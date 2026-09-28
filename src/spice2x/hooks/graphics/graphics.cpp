@@ -6,6 +6,7 @@
 #include "graphics.h"
 
 #include <chrono>
+#include <cstdlib>
 #include <set>
 #include <thread>
 #include <vector>
@@ -1348,7 +1349,7 @@ void graphics_init() {
     graphics_d3d9_init();
     graphics_d3d11_init();
 
-    // general hooks
+    // general hooks (all loaded DLLs; process image is skipped by peb::skip_entry)
     ChangeDisplaySettingsA_orig = detour::iat_try("ChangeDisplaySettingsA", ChangeDisplaySettingsA_hook);
     ChangeDisplaySettingsExA_orig = detour::iat_try("ChangeDisplaySettingsExA", ChangeDisplaySettingsExA_hook);
     ClipCursor_orig = detour::iat_try("ClipCursor", ClipCursor_hook);
@@ -1376,6 +1377,48 @@ void graphics_init() {
 
     detour::iat_try("SetWindowsHookExA", SetWindowsHookExA_hook);
     detour::iat_try("SetCursorPos", SetCursorPos_hook);
+
+    // Injected EXE games: the process image was skipped above. Patch its
+    // user32 IAT directly so CreateWindowExA / EnumDisplayDevicesA see the hooks.
+    if (getenv("SPICE_INJECTED") != nullptr && avs::game::DLL_INSTANCE != nullptr) {
+        const auto module = avs::game::DLL_INSTANCE;
+
+#define KEEP_ORIG(orig, name, hook) do { \
+            auto *tmp = detour::iat_try(name, hook, module); \
+            if ((orig) == nullptr) { \
+                (orig) = tmp; \
+            } \
+        } while (0)
+
+        KEEP_ORIG(ChangeDisplaySettingsA_orig, "ChangeDisplaySettingsA", ChangeDisplaySettingsA_hook);
+        KEEP_ORIG(ChangeDisplaySettingsExA_orig, "ChangeDisplaySettingsExA", ChangeDisplaySettingsExA_hook);
+        KEEP_ORIG(ClipCursor_orig, "ClipCursor", ClipCursor_hook);
+        KEEP_ORIG(CreateWindowExA_orig, "CreateWindowExA", CreateWindowExA_hook);
+        KEEP_ORIG(CreateWindowExW_orig, "CreateWindowExW", CreateWindowExW_hook);
+        KEEP_ORIG(EnableWindow_orig, "EnableWindow", EnableWindow_hook);
+        KEEP_ORIG(EnumDisplayDevicesA_orig, "EnumDisplayDevicesA", EnumDisplayDevicesA_hook);
+        KEEP_ORIG(MoveWindow_orig, "MoveWindow", MoveWindow_hook);
+        KEEP_ORIG(PeekMessageA_orig, "PeekMessageA", PeekMessageA_hook);
+        KEEP_ORIG(RegisterClassA_orig, "RegisterClassA", RegisterClassA_hook);
+        KEEP_ORIG(RegisterClassExA_orig, "RegisterClassExA", RegisterClassExA_hook);
+        KEEP_ORIG(RegisterClassW_orig, "RegisterClassW", RegisterClassW_hook);
+        KEEP_ORIG(RegisterClassExW_orig, "RegisterClassExW", RegisterClassExW_hook);
+        KEEP_ORIG(ShowCursor_orig, "ShowCursor", ShowCursor_hook);
+        KEEP_ORIG(SetCursor_orig, "SetCursor", SetCursor_hook);
+        KEEP_ORIG(SetWindowLongA_orig, "SetWindowLongA", SetWindowLongA_hook);
+        KEEP_ORIG(SetWindowLongW_orig, "SetWindowLongW", SetWindowLongW_hook);
+        KEEP_ORIG(SetWindowPos_orig, "SetWindowPos", SetWindowPos_hook);
+        KEEP_ORIG(ShowWindow_orig, "ShowWindow", ShowWindow_hook);
+
+#undef KEEP_ORIG
+
+        detour::iat_try("MessageBoxA", MessageBoxA_hook, module);
+        detour::iat_try("MessageBoxExA", MessageBoxExA_hook, module);
+        detour::iat_try("MessageBoxW", MessageBoxW_hook, module);
+        detour::iat_try("MessageBoxExW", MessageBoxExW_hook, module);
+        detour::iat_try("SetWindowsHookExA", SetWindowsHookExA_hook, module);
+        detour::iat_try("SetCursorPos", SetCursorPos_hook, module);
+    }
 }
 
 void graphics_hook_window(HWND hWnd, D3DPRESENT_PARAMETERS *pPresentationParameters) {
