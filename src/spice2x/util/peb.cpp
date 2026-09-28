@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdlib>
 
 #include <windows.h>
 #include <intrin.h>
@@ -23,8 +24,13 @@ static bool skip_entry(const LDR_DATA_TABLE_ENTRY* entry) {
     if (string_ends_with(entry->FullDllName.Buffer, L"kld.dll"))
         return true;
 
-    // skip our own module
-    return module == GetModuleHandle(NULL);
+    // Skip the process image when spice.exe is the host so iat_try does not
+    // patch the launcher. When spicehook is injected into an old EXE game,
+    // GetModuleHandle(NULL) is the game - patching its IAT is required.
+    if (module == GetModuleHandle(NULL) && getenv("SPICE_INJECTED") == nullptr)
+        return true;
+
+    return false;
 }
 
 const LDR_DATA_TABLE_ENTRY* peb::entry_first() {
