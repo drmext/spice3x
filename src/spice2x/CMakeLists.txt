@@ -827,8 +827,8 @@ set_target_properties(spicetools_spice_hook PROPERTIES PREFIX "" OUTPUT_NAME "sp
 # Prefer a high image base so LoadLibrary rebases away from bm2dx.exe @ 0x400000.
 if(NOT MSVC)
     set_target_properties(spicetools_spice_hook PROPERTIES
-            COMPILE_FLAGS "-m32"
-            LINK_FLAGS "-m32 -Wl,--disable-dynamicbase,--image-base=0x30000000,--enable-stdcall-fixup")
+            COMPILE_FLAGS "-m32 -mstackrealign"
+            LINK_FLAGS "-m32 -Wl,--disable-dynamicbase,--image-base=0x30000000,--exclude-all-symbols")
 endif()
 
 # Copy to a stable path and generate an RC that embeds it as RCDATA.

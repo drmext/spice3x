@@ -168,7 +168,17 @@ namespace launcher {
                 continue;
             }
             if (strcmp(reinterpret_cast<const char *>(data + name_off), name) == 0) {
-                return funcs[ords[i]];
+                const DWORD rva = funcs[ords[i]];
+                // A .def name that does not match the stdcall symbol is exported
+                // as a bogus high RVA (observed 0xD0000000). Reject anything
+                // that does not land in a real section.
+                if (rva_to_off(rva) == static_cast<size_t>(-1)) {
+                    log_warning("exe-inject",
+                            "export {} has invalid RVA {:#x}",
+                            name, rva);
+                    return 0;
+                }
+                return rva;
             }
         }
         return 0;
