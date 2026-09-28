@@ -129,12 +129,14 @@ struct UsbDeviceDescriptor {
     uint8_t bNumConfigurations;
 };
 
+// Natural alignment of the ezusb.sys struct: one pad byte before the USHORTs.
 struct VendorOrClassRequestControl {
     uint8_t direction;
     uint8_t request_type;
     uint8_t recipient;
     uint8_t request_type_reserved_bits;
     uint8_t request;
+    uint8_t pad;
     uint16_t value;
     uint16_t index;
 };
