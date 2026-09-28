@@ -911,10 +911,12 @@ static BOOL WINAPI EnumDisplayDevicesA_hook(LPCTSTR lpDevice, DWORD iDevNum,
 
 #ifndef SPICE64
     // older IIDX games check for hardcoded PCI vendor/device ID pair of GPU
-    if ((avs::game::is_model("JDZ") || avs::game::is_model("KDZ")) && value) {
+    if ((avs::game::is_model("JDJ")
+            || avs::game::is_model("JDZ")
+            || avs::game::is_model("KDZ")) && value) {
         log_info(
             "graphics",
-            "EnumDisplayDevicesA_hook: swap DeviceID {} with {} (for IIDX 18/19)",
+            "EnumDisplayDevicesA_hook: swap DeviceID {} with {} (for IIDX 17-19)",
             lpDisplayDevice->DeviceID,
             GRAPHICS_DEVICEID.c_str());
         memcpy(&lpDisplayDevice->DeviceID, GRAPHICS_DEVICEID.c_str(), GRAPHICS_DEVICEID.size() + 1);
