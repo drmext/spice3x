@@ -10,14 +10,15 @@
 #include "util/logging.h"
 #include "util/utils.h"
 
-BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID) {
-    if (fdwReason == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(hinstDLL);
-    }
+BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) {
+    // Do not call DisableThreadLibraryCalls. The init thread is created by
+    // CreateRemoteThread, and MinGW's CRT sets up that thread from
+    // DLL_THREAD_ATTACH. Skipping it leaves TLS/errno unmapped and the first
+    // CRT call access-violates.
     return TRUE;
 }
 
-extern "C" DWORD WINAPI spice_exe_init(LPVOID) {
+extern "C" SPICE_THREAD_ENTRY DWORD WINAPI spice_exe_init(LPVOID) {
     const char *cmdline = getenv("SPICE_CMDLINE");
     if (!cmdline || !*cmdline) {
         // Fall back to the process command line (bm2dx.exe args) — still
