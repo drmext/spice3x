@@ -28,6 +28,7 @@ constexpr uint16_t EZUSB_PID = 0x2235;
 
 constexpr size_t EZUSB_PAGESIZE = 62;
 constexpr size_t SECURITY2_NPAGES = 5;
+constexpr size_t SRAM_NPAGES = 12;
 
 enum PipeNum : ULONG {
     PIPE_INT_OUT = 0,
@@ -42,6 +43,7 @@ enum NodeId : uint8_t {
     NODE_FPGA_V2 = 0x04,
     NODE_16SEG = 0x05,
     NODE_COIN = 0x09,
+    NODE_SRAM = 0x40,
     NODE_SECURITY_MEM = 0xFE,
 };
 
@@ -109,6 +111,12 @@ enum FpgaStatus : uint8_t {
     FPGA_CHECK_OK = 0x42,
     FPGA_WRITE_OK = 0x43,
     FPGA_FAULT = 0xFE,
+};
+
+enum SramCmd : uint8_t {
+    SRAM_CMD_READ = 0x02,
+    SRAM_CMD_WRITE = 0x03,
+    SRAM_CMD_DONE = 0x04,
 };
 
 #pragma pack(push, 1)
@@ -235,6 +243,10 @@ uint8_t g_coin_mode = 0;
 DongleSlot g_dongle_slot = SLOT_BLACK;
 DongleMem g_dongle_mem = MEM_ROM;
 uint8_t g_rom_seed = 0;
+
+uint8_t g_sram[EZUSB_PAGESIZE * SRAM_NPAGES] {};
+uint8_t g_sram_last_cmd = 0;
+int g_sram_read_page = 0;
 
 constexpr char kBlackSignKey[8] = {'2', 'D', 'X', 'G', 'L', 'D', 'A', 'C'};
 constexpr char kWhiteSignKey[8] = {'E', '-', 'A', 'M', 'U', 'S', 'E', '3'};
@@ -474,6 +486,23 @@ uint8_t process_fpga(uint8_t cmd) {
     }
 }
 
+uint8_t process_sram(uint8_t cmd) {
+    g_sram_last_cmd = cmd;
+    switch (cmd) {
+        case SRAM_CMD_READ:
+        case SRAM_CMD_WRITE:
+            g_sram_read_page = 0;
+            break;
+        case SRAM_CMD_DONE:
+            break;
+        default:
+            log_warning("iidx::ezusb2", "unknown sram cmd {:02x}", cmd);
+            break;
+    }
+    // bemani always returns 0 for SRAM commands
+    return 0;
+}
+
 bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
     switch (node) {
         case NODE_NONE:
@@ -493,6 +522,9 @@ bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
             return true;
         case NODE_FPGA_V2:
             g_status = process_fpga(cmd);
+            return true;
+        case NODE_SRAM:
+            g_status = process_sram(cmd);
             return true;
         default:
             log_warning("iidx::ezusb2", "unknown node {:02x}", node);
@@ -607,6 +639,22 @@ bool bulk_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
                 return false;
             }
             break;
+        case NODE_SRAM:
+            if (g_sram_last_cmd != SRAM_CMD_READ) {
+                log_warning("iidx::ezusb2", "sram bulk read without READ cmd ({:02x})",
+                        g_sram_last_cmd);
+                return false;
+            }
+            if (g_sram_read_page >= static_cast<int>(SRAM_NPAGES)) {
+                log_warning("iidx::ezusb2", "sram read overrun");
+                return false;
+            }
+            // Gold to Sirius require node 0x40 on the returned page
+            pkg.node = NODE_SRAM;
+            pkg.page = static_cast<uint8_t>(g_sram_read_page);
+            memcpy(pkg.payload, g_sram + g_sram_read_page * EZUSB_PAGESIZE, EZUSB_PAGESIZE);
+            g_sram_read_page++;
+            break;
         case NODE_SECURITY_MEM:
         case NODE_NONE:
         case NODE_FPGA_V2:
@@ -635,6 +683,13 @@ bool bulk_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
                 return false;
             }
             memcpy(g_sec_mem + pkg.page * EZUSB_PAGESIZE, pkg.payload, EZUSB_PAGESIZE);
+            return true;
+        case NODE_SRAM:
+            if (pkg.page >= SRAM_NPAGES) {
+                log_warning("iidx::ezusb2", "sram write overrun page {:02x}", pkg.page);
+                return false;
+            }
+            memcpy(g_sram + pkg.page * EZUSB_PAGESIZE, pkg.payload, EZUSB_PAGESIZE);
             return true;
         case NODE_SECURITY_PLUG:
         case NODE_NONE:
