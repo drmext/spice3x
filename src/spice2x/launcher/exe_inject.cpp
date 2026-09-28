@@ -79,10 +79,15 @@ namespace launcher {
     std::optional<ExeGameTarget> try_detect_jdj() {
         // Prefer sidcode next to spice.exe; also try parent when spice lives
         // inside the date folder (e.g. JDJ\2010071200\spice.exe).
-        const std::filesystem::path candidates[] = {
-            MODULE_PATH / "sidcode.txt",
-            MODULE_PATH.parent_path() / "sidcode.txt",
-        };
+        std::vector<std::filesystem::path> candidates;
+        std::error_code cwd_error;
+        auto cwd = std::filesystem::current_path(cwd_error);
+        if (!cwd_error) {
+            candidates.push_back(cwd / "sidcode.txt");
+            candidates.push_back(cwd.parent_path() / "sidcode.txt");
+        }
+        candidates.push_back(MODULE_PATH / "sidcode.txt");
+        candidates.push_back(MODULE_PATH.parent_path() / "sidcode.txt");
 
         for (const auto &path : candidates) {
             auto target = parse_sidcode_file(path);

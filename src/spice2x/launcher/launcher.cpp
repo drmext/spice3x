@@ -311,6 +311,27 @@ int main_implementation(int argc, char *argv[]) {
         eamuse_autodetect_game();
     }
 
+#if !defined(SPICE64)
+    if (avs::game::MODEL[0] == '\0') {
+        if (auto jdj = launcher::try_detect_jdj()) {
+            if (jdj->dest.size() == 1) {
+                avs::game::DEST[0] = jdj->dest[0];
+            }
+            if (jdj->spec.size() == 1) {
+                avs::game::SPEC[0] = jdj->spec[0];
+            }
+            if (jdj->rev.size() == 1) {
+                avs::game::REV[0] = jdj->rev[0];
+            }
+            if (jdj->ext.size() == 10) {
+                strcpy(avs::game::EXT, jdj->ext.c_str());
+            }
+            strcpy(avs::game::MODEL, jdj->model.c_str());
+            eamuse_autodetect_game();
+        }
+    }
+#endif
+
     // grab merged game options
     auto options_ptr = games::get_options(eamuse_get_game());
     if (!options_ptr) {
