@@ -40,6 +40,7 @@
 #include "bi2a.h"
 #include "bi2x_hook.h"
 #include "ezusb.h"
+#include "ezusb2.h"
 #include "io.h"
 #include "poke.h"
 
@@ -318,37 +319,48 @@ namespace games::iidx {
             // reduce boot wait time
             hooks::sleep::init(1000, 1);
 
-            // add old IO board
+            const bool is_jdj = avs::game::is_model("JDJ");
+
+            // EZ-USB / FX2 setupapi entry (same GUID for both board generations)
             SETUPAPI_SETTINGS settings1 {};
             settings1.class_guid[0] = 0xAE18AA60;
             settings1.class_guid[1] = 0x11D47F6A;
             settings1.class_guid[2] = 0x0100DD97;
             settings1.class_guid[3] = 0x59B92902;
-            const char property1[] = "Cypress EZ-USB (2235 - EEPROM missing)";
+            const char property1_old[] = "Cypress EZ-USB (2235 - EEPROM missing)";
+            const char property1_fx2[] = "Cypress EZ-USB FX2LP - EEPROM missing";
+            const char *property1 = is_jdj ? property1_fx2 : property1_old;
             const char interface_detail1[] = "\\\\.\\Ezusb-0";
-            memcpy(settings1.property_devicedesc, property1, sizeof(property1));
+            memcpy(settings1.property_devicedesc, property1, strlen(property1) + 1);
             memcpy(settings1.interface_detail, interface_detail1, sizeof(interface_detail1));
             setupapihook_init(avs::game::DLL_INSTANCE);
             setupapihook_add(settings1);
 
-            // IIDX <25 with EZUSB input device
             devicehook_init();
-            devicehook_add(new EZUSBHandle());
+            if (is_jdj) {
+                // Sirius uses the FX2 IO2 protocol and round-plug v2
+                devicehook_add(new EZUSB2Handle());
+                // Patch the exe IAT after threads resume (PEB walk skips it)
+                devicehook_init_module(avs::game::DLL_INSTANCE);
+            } else {
+                // IIDX <25 with EZUSB input device
+                devicehook_add(new EZUSBHandle());
 
-            // add new BIO2 I/O board
-            SETUPAPI_SETTINGS settings2 {};
-            settings2.class_guid[0] = 0x4D36E978;
-            settings2.class_guid[1] = 0x11CEE325;
-            settings2.class_guid[2] = 0x0008C1BF;
-            settings2.class_guid[3] = 0x1803E12B;
-            const char property2[] = "BIO2(VIDEO)";
-            const char interface_detail2[] = "COM2";
-            memcpy(settings2.property_devicedesc, property2, sizeof(property2));
-            memcpy(settings2.interface_detail, interface_detail2, sizeof(interface_detail2));
-            setupapihook_add(settings2);
+                // add new BIO2 I/O board
+                SETUPAPI_SETTINGS settings2 {};
+                settings2.class_guid[0] = 0x4D36E978;
+                settings2.class_guid[1] = 0x11CEE325;
+                settings2.class_guid[2] = 0x0008C1BF;
+                settings2.class_guid[3] = 0x1803E12B;
+                const char property2[] = "BIO2(VIDEO)";
+                const char interface_detail2[] = "COM2";
+                memcpy(settings2.property_devicedesc, property2, sizeof(property2));
+                memcpy(settings2.interface_detail, interface_detail2, sizeof(interface_detail2));
+                setupapihook_add(settings2);
 
-            // IIDX 25+ BIO2 BI2A input device
-            devicehook_add(new IIDXFMSerialHandle());
+                // IIDX 25+ BIO2 BI2A input device
+                devicehook_add(new IIDXFMSerialHandle());
+            }
         }
 
 #if SPICE64

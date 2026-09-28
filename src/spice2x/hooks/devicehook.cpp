@@ -5,6 +5,7 @@
 #include "avs/game.h"
 #include "games/gitadora/gitadora.h"
 #include "util/detour.h"
+#include "util/logging.h"
 #include "util/utils.h"
 
 #include <tlhelp32.h>
@@ -587,6 +588,30 @@ void devicehook_init(HMODULE module) {
     STORE(WriteFile_orig, detour::iat_try("WriteFile", WriteFile_hook, module));
 
     suspend_or_resume_other_threads(false);
+
+#undef STORE
+}
+
+void devicehook_init_module(HMODULE module) {
+    if (!hooks::device::ENABLE || module == nullptr) {
+        return;
+    }
+
+#define STORE(value, expr) { \
+    auto tmp = (expr); \
+    if ((value) == nullptr) { \
+        (value) = tmp; \
+    } \
+}
+
+    log_info("devicehook", "init_module {}", fmt::ptr(module));
+
+    // No thread suspend: VirtualProtect on the process image IAT while the
+    // main thread is frozen hangs Sirius inject.
+    STORE(CloseHandle_orig, detour::iat_try("CloseHandle", CloseHandle_hook, module));
+    STORE(CreateFileA_orig, detour::iat_try("CreateFileA", CreateFileA_hook, module));
+    STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
+    STORE(DeviceIoControl_orig, detour::iat_try("DeviceIoControl", DeviceIoControl_hook, module));
 
 #undef STORE
 }

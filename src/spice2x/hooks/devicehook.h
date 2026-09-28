@@ -77,5 +77,11 @@ public:
 
 void devicehook_init(HMODULE module = nullptr);
 void devicehook_init_trampoline();
+
+// Patch CreateFileA/W, DeviceIoControl, and CloseHandle on a specific module
+// without suspending other threads. Used after devicehook_init() for injected
+// EXE games where the process image was skipped by the PEB walk.
+void devicehook_init_module(HMODULE module);
+
 void devicehook_add(CustomHandle *device_handle);
 void devicehook_dispose();
