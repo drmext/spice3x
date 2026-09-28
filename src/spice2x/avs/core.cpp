@@ -1459,9 +1459,13 @@ namespace avs {
         }
 
         void config_destroy(property_ptr prop) {
-            void *mem = property_desc_to_buffer(prop);
-            property_destroy(prop);
-            free(mem);
+            if (property_desc_to_buffer) {
+                void *mem = property_desc_to_buffer(prop);
+                property_destroy(prop);
+                free(mem);
+            } else if (prop) {
+                property_destroy(prop);
+            }
         }
 
         /*
@@ -1573,8 +1577,21 @@ namespace avs {
                     DLL_INSTANCE, IMPORTS[ver].shutdown);
             property_node_create = libutils::get_proc<PROPERTY_NODE_CREATE_T>(
                     DLL_INSTANCE, IMPORTS[ver].property_node_create);
-            property_desc_to_buffer = libutils::get_proc<PROPERTY_DESC_TO_BUFFER_T>(
-                    DLL_INSTANCE, IMPORTS[ver].property_desc_to_buffer);
+            // IIDX 17 libavs-win32.dll matches legacy via property_search, but it
+            // does not export property_desc_to_buffer. Later AVS versions do, and
+            // config_destroy needs it to free the property buffer.
+            if (VERSION == AVSLEGACY) {
+                property_desc_to_buffer = libutils::try_proc<PROPERTY_DESC_TO_BUFFER_T>(
+                        DLL_INSTANCE, IMPORTS[ver].property_desc_to_buffer);
+                if (!property_desc_to_buffer) {
+                    log_info("avs-core",
+                            "{} is not exported; config buffer will not be freed",
+                            IMPORTS[ver].property_desc_to_buffer);
+                }
+            } else {
+                property_desc_to_buffer = libutils::get_proc<PROPERTY_DESC_TO_BUFFER_T>(
+                        DLL_INSTANCE, IMPORTS[ver].property_desc_to_buffer);
+            }
             property_destroy = libutils::get_proc<PROPERTY_DESTROY_T>(
                     DLL_INSTANCE, IMPORTS[ver].property_destroy);
             property_create = libutils::get_proc<PROPERTY_CREATE_T>(
