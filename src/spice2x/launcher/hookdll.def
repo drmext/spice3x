@@ -1,0 +1,4 @@
+LIBRARY spicehook
+
+EXPORTS
+spice_exe_init

@@ -650,9 +650,10 @@ int eamuse_get_game_keypads_name() {
 void eamuse_autodetect_game() {
     if (avs::game::is_model("KFC"))
         eamuse_set_game("Sound Voltex");
-    else if (avs::game::is_model("JDZ") ||
+    else     if (avs::game::is_model("JDZ") ||
              avs::game::is_model("KDZ") ||
-             avs::game::is_model("LDJ"))
+             avs::game::is_model("LDJ") ||
+             avs::game::is_model("JDJ"))
         eamuse_set_game("Beatmania IIDX");
     else if (avs::game::is_model("J44") ||
              avs::game::is_model("K44") ||

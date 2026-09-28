@@ -637,6 +637,7 @@ set(SOURCE_FILES ${SOURCE_FILES}
         launcher/richpresence.cpp
         launcher/shutdown.cpp
         launcher/options.cpp
+        launcher/exe_inject.cpp
 
         # misc
         misc/bt5api.cpp
@@ -815,12 +816,47 @@ if(NOT MSVC)
     set_target_properties(spicetools_spice_objs PROPERTIES COMPILE_FLAGS "-m32")
 endif()
 
+# spicehook (32-bit hook image embedded into spice.exe; not shipped separately)
+##############################################################################
+
+add_library(spicetools_spice_hook SHARED
+        launcher/hookdll.cpp
+        launcher/hookdll.def)
+target_link_libraries(spicetools_spice_hook PRIVATE spicetools_spice_objs shell32)
+set_target_properties(spicetools_spice_hook PROPERTIES PREFIX "" OUTPUT_NAME "spicehook")
+# Prefer a high image base so LoadLibrary rebases away from bm2dx.exe @ 0x400000.
+if(NOT MSVC)
+    set_target_properties(spicetools_spice_hook PROPERTIES
+            COMPILE_FLAGS "-m32"
+            LINK_FLAGS "-m32 -Wl,--disable-dynamicbase,--image-base=0x30000000,--enable-stdcall-fixup")
+endif()
+
+# Copy to a stable path and generate an RC that embeds it as RCDATA.
+set(HOOK_EMBED_DLL "${CMAKE_CURRENT_BINARY_DIR}/spicehook_embed.dll")
+set(HOOK_EMBED_RC "${CMAKE_CURRENT_BINARY_DIR}/hookdll_embed.rc")
+add_custom_command(
+        OUTPUT "${HOOK_EMBED_DLL}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:spicetools_spice_hook>" "${HOOK_EMBED_DLL}"
+        DEPENDS spicetools_spice_hook
+        VERBATIM)
+file(TO_CMAKE_PATH "${HOOK_EMBED_DLL}" HOOK_EMBED_DLL_CMAKE)
+file(TO_CMAKE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cfg/resource.h" HOOK_EMBED_RESOURCE_H)
+file(WRITE "${HOOK_EMBED_RC}"
+        "#include \"${HOOK_EMBED_RESOURCE_H}\"\n"
+        "IDR_SPICEHOOK RCDATA \"${HOOK_EMBED_DLL_CMAKE}\"\n")
+set_source_files_properties("${HOOK_EMBED_RC}" PROPERTIES
+        LANGUAGE RC
+        OBJECT_DEPENDS "${HOOK_EMBED_DLL}")
+add_custom_target(spicetools_spice_hook_embed DEPENDS "${HOOK_EMBED_DLL}")
+
 # spice.exe
 ###########
 
-set(RESOURCE_FILES build/manifest.manifest build/manifest.rc build/icon.rc cfg/Win32D.rc)
+set(RESOURCE_FILES build/manifest.manifest build/manifest.rc build/icon.rc cfg/Win32D.rc "${HOOK_EMBED_RC}")
 add_executable(spicetools_spice ${RESOURCE_FILES})
 target_link_libraries(spicetools_spice PRIVATE spicetools_spice_objs)
+add_dependencies(spicetools_spice spicetools_spice_hook_embed)
 set_target_properties(spicetools_spice PROPERTIES PREFIX "")
 set_target_properties(spicetools_spice PROPERTIES OUTPUT_NAME "spice")
 
@@ -831,9 +867,10 @@ endif()
 # spice_laa.exe
 ###########
 
-set(RESOURCE_FILES build/manifest.manifest build/manifest.rc build/icon.rc cfg/Win32D.rc)
+set(RESOURCE_FILES build/manifest.manifest build/manifest.rc build/icon.rc cfg/Win32D.rc "${HOOK_EMBED_RC}")
 add_executable(spicetools_spice_laa ${RESOURCE_FILES})
 target_link_libraries(spicetools_spice_laa PRIVATE spicetools_spice_objs)
+add_dependencies(spicetools_spice_laa spicetools_spice_hook_embed)
 set_target_properties(spicetools_spice_laa PROPERTIES PREFIX "")
 set_target_properties(spicetools_spice_laa PROPERTIES OUTPUT_NAME "spice_laa")
 
@@ -844,11 +881,12 @@ endif()
 # spice_linux.exe
 ###########
 
-set(RESOURCE_FILES build/manifest.manifest build/manifest.rc build/icon.rc cfg/Win32D.rc)
+set(RESOURCE_FILES build/manifest.manifest build/manifest.rc build/icon.rc cfg/Win32D.rc "${HOOK_EMBED_RC}")
 add_executable(spicetools_spice_linux ${SOURCE_FILES} ${RESOURCE_FILES})
 target_link_libraries(spicetools_spice_linux
         PUBLIC d3d9 ws2_32 version comctl32 shlwapi iphlpapi hid secur32 setupapi psapi winmm winhttp
         PRIVATE fmt::fmt-header-only discord-rpc imgui hash-library minhook wslay imm32 dwmapi CpuFeatures::cpu_features spice_jpeg spice_x264)
+add_dependencies(spicetools_spice_linux spicetools_spice_hook_embed)
 set_target_properties(spicetools_spice_linux PROPERTIES PREFIX "")
 set_target_properties(spicetools_spice_linux PROPERTIES OUTPUT_NAME "spice_linux")
 target_compile_definitions(spicetools_spice_linux PRIVATE NO_SCARD=1 PRIVATE SPICE_LINUX=1)

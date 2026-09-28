@@ -89,6 +89,7 @@
 #include "hooks/nicspoof.h"
 #include "hooks/unisintrhook.h"
 #include "launcher/launcher.h"
+#include "launcher/exe_inject.h"
 #include "launcher/logger.h"
 #include "launcher/signal.h"
 #include "launcher/richpresence.h"
@@ -320,9 +321,11 @@ int main_implementation(int argc, char *argv[]) {
 #if !SPICE_XP
 
     {
-        // skip elevation only if AutoElevate is explicitly set to "user"
-        const bool skip_elevation = options[launcher::Options::AutoElevate].is_active() &&
-            options[launcher::Options::AutoElevate].value_text() == "user";
+        // skip elevation when already injected into the game, or when AutoElevate is "user"
+        const bool spice_injected = getenv("SPICE_INJECTED") != nullptr;
+        const bool skip_elevation = spice_injected ||
+            (options[launcher::Options::AutoElevate].is_active() &&
+            options[launcher::Options::AutoElevate].value_text() == "user");
         if (!skip_elevation && !sysutils::is_running_as_admin()) {
             log_info("launcher", "relaunching with administrator privileges");
             if (sysutils::relaunch_as_admin()) {
@@ -1907,6 +1910,56 @@ int main_implementation(int argc, char *argv[]) {
         }
     }
 
+#if !defined(SPICE64)
+    // Injected into an old EXE game (spicehook.dll loaded via CreateRemoteThread).
+    // The game owns avs_boot / ea3_boot / the main loop — we only install hooks.
+    if (getenv("SPICE_INJECTED") != nullptr) {
+        log_info("launcher", "running in injected EXE mode");
+
+        auto target = launcher::try_detect_jdj();
+        if (!target) {
+            log_fatal("launcher", "injected mode requires JDJ sidcode.txt next to the game");
+        }
+
+        // GetModuleHandle(NULL) is bm2dx.exe; keep MODULE_PATH on the date folder
+        MODULE_PATH = target->work_dir;
+
+        memset(avs::game::MODEL, 0, sizeof(avs::game::MODEL));
+        strncpy(avs::game::MODEL, target->model.c_str(), sizeof(avs::game::MODEL) - 1);
+        avs::game::DEST[0] = target->dest.empty() ? '0' : target->dest[0];
+        avs::game::DEST[1] = '\0';
+        avs::game::SPEC[0] = target->spec.empty() ? '0' : target->spec[0];
+        avs::game::SPEC[1] = '\0';
+        avs::game::REV[0] = target->rev.empty() ? '0' : target->rev[0];
+        avs::game::REV[1] = '\0';
+        memset(avs::game::EXT, 0, sizeof(avs::game::EXT));
+        strncpy(avs::game::EXT, target->ext.c_str(), sizeof(avs::game::EXT) - 1);
+
+        avs::game::DLL_NAME = "bm2dx.exe";
+        avs::game::DLL_INSTANCE = GetModuleHandleW(nullptr);
+
+        eamuse_autodetect_game();
+        log_info("launcher", "injected game identity {}", avs::game::get_identifier());
+
+        // Bind already-loaded libavs-win32*.dll imports (static imports of the exe)
+        avs::core::load_dll();
+        avs::ea3::load_dll();
+
+        stubs::attach();
+
+        // Intentionally leaked: IAT hooks and device handles must outlive this return.
+        auto *iidx_game = new games::iidx::IIDXGame();
+        iidx_game->pre_attach();
+        iidx_game->attach();
+        iidx_game->post_attach();
+
+        graphics_init();
+
+        log_info("launcher", "injected hooks ready; returning control to bm2dx.exe");
+        return 0;
+    }
+#endif
+
     // auto detect game if not specified
     if (avs::game::DLL_NAME.empty()) {
         bool module_path_tried = false;
@@ -1923,6 +1976,15 @@ int main_implementation(int argc, char *argv[]) {
                 }
                 break;
             }
+
+#if !defined(SPICE64)
+            // IIDX 17 Sirius — bm2dx.exe in a date folder named by sidcode.txt
+            if (!cfg_run && !cfg::CONFIGURATOR_STANDALONE) {
+                if (auto jdj = launcher::try_detect_jdj()) {
+                    return launcher::exe_inject(*jdj);
+                }
+            }
+#endif
 
             // SDVX
             if (check_dll("soundvoltex.dll")) {
