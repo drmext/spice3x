@@ -341,6 +341,8 @@ namespace games::iidx {
             if (is_jdj) {
                 // Sirius: ezusb.sys ioctls, ezusb-iidx v2 packets, round-plug v2
                 devicehook_add(new EZUSB2Handle());
+                // Two ICCA nodes on COM1; legacy framing for old libacio
+                devicehook_add(new acioemu::ACIOHandle(L"COM1", 2, true));
                 // Patch the exe IAT after threads resume (PEB walk skips it)
                 devicehook_init_module(avs::game::DLL_INSTANCE);
             } else {

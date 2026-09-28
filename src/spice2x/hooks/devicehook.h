@@ -78,9 +78,11 @@ public:
 void devicehook_init(HMODULE module = nullptr);
 void devicehook_init_trampoline();
 
-// Patch CreateFileA/W, DeviceIoControl, and CloseHandle on a specific module
-// without suspending other threads. Used after devicehook_init() for injected
-// EXE games where the process image was skipped by the PEB walk.
+// Patch CreateFile, ReadFile, WriteFile, DeviceIoControl, CloseHandle, LoadLibrary,
+// and the serial/comm APIs on a specific module without suspending other threads.
+// Used after devicehook_init() for injected EXE games where the process image was
+// skipped by the PEB walk. LoadLibrary is hooked so later DLLs (libacio) get the
+// same patches when they load.
 void devicehook_init_module(HMODULE module);
 
 void devicehook_add(CustomHandle *device_handle);

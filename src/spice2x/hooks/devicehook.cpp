@@ -33,6 +33,8 @@ static decltype(GetCommState) *GetCommState_orig = nullptr;
 static decltype(GetFileSize) *GetFileSize_orig = nullptr;
 static decltype(GetFileSizeEx) *GetFileSizeEx_orig = nullptr;
 static decltype(GetFileInformationByHandle) *GetFileInformationByHandle_orig = nullptr;
+static decltype(LoadLibraryA) *LoadLibraryA_orig = nullptr;
+static decltype(LoadLibraryW) *LoadLibraryW_orig = nullptr;
 static decltype(PurgeComm) *PurgeComm_orig = nullptr;
 static decltype(ReadFile) *ReadFile_orig = nullptr;
 static decltype(SetupComm) *SetupComm_orig = nullptr;
@@ -539,6 +541,23 @@ static void suspend_or_resume_other_threads(bool suspending) {
     CloseHandle(hThreadSnap);
 }
 
+static HMODULE WINAPI LoadLibraryA_hook(LPCSTR lpLibFileName) {
+    HMODULE module = LoadLibraryA_orig(lpLibFileName);
+    if (module != nullptr) {
+        // Hook newly loaded modules (e.g. libacio.dll) without thread suspend
+        devicehook_init_module(module);
+    }
+    return module;
+}
+
+static HMODULE WINAPI LoadLibraryW_hook(LPCWSTR lpLibFileName) {
+    HMODULE module = LoadLibraryW_orig(lpLibFileName);
+    if (module != nullptr) {
+        devicehook_init_module(module);
+    }
+    return module;
+}
+
 void devicehook_init(HMODULE module) {
     if (!hooks::device::ENABLE) {
         return;
@@ -608,10 +627,28 @@ void devicehook_init_module(HMODULE module) {
 
     // No thread suspend: VirtualProtect on the process image IAT while the
     // main thread is frozen hangs Sirius inject.
+    STORE(ClearCommBreak_orig, detour::iat_try("ClearCommBreak", ClearCommBreak_hook, module));
+    STORE(ClearCommError_orig, detour::iat_try("ClearCommError", ClearCommError_hook, module));
     STORE(CloseHandle_orig, detour::iat_try("CloseHandle", CloseHandle_hook, module));
     STORE(CreateFileA_orig, detour::iat_try("CreateFileA", CreateFileA_hook, module));
     STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
     STORE(DeviceIoControl_orig, detour::iat_try("DeviceIoControl", DeviceIoControl_hook, module));
+    STORE(EscapeCommFunction_orig, detour::iat_try("EscapeCommFunction", EscapeCommFunction_hook, module));
+    STORE(GetCommState_orig, detour::iat_try("GetCommState", GetCommState_hook, module));
+    STORE(GetFileSize_orig, detour::iat_try("GetFileSize", GetFileSize_hook, module));
+    STORE(GetFileSizeEx_orig, detour::iat_try("GetFileSizeEx", GetFileSizeEx_hook, module));
+    STORE(GetFileInformationByHandle_orig, detour::iat_try(
+                "GetFileInformationByHandle", GetFileInformationByHandle_hook, module));
+    STORE(LoadLibraryA_orig, detour::iat_try("LoadLibraryA", LoadLibraryA_hook, module));
+    STORE(LoadLibraryW_orig, detour::iat_try("LoadLibraryW", LoadLibraryW_hook, module));
+    STORE(PurgeComm_orig, detour::iat_try("PurgeComm", PurgeComm_hook, module));
+    STORE(ReadFile_orig, detour::iat_try("ReadFile", ReadFile_hook, module));
+    STORE(SetupComm_orig, detour::iat_try("SetupComm", SetupComm_hook, module));
+    STORE(SetCommBreak_orig, detour::iat_try("SetCommBreak", SetCommBreak_hook, module));
+    STORE(SetCommMask_orig, detour::iat_try("SetCommMask", SetCommMask_hook, module));
+    STORE(SetCommState_orig, detour::iat_try("SetCommState", SetCommState_hook, module));
+    STORE(SetCommTimeouts_orig, detour::iat_try("SetCommTimeouts", SetCommTimeouts_hook, module));
+    STORE(WriteFile_orig, detour::iat_try("WriteFile", WriteFile_hook, module));
 
 #undef STORE
 }
