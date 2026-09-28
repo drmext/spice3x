@@ -1,10 +1,8 @@
 #include "ezusb2.h"
 
 #include <algorithm>
-#include <array>
 #include <cstring>
 #include <string>
-#include <vector>
 
 #include "avs/ea3.h"
 #include "external/hash-library/md5.h"
@@ -17,25 +15,31 @@
 namespace games::iidx {
 namespace {
 
-// CTL_CODE(FILE_DEVICE_UNKNOWN, 8/9, METHOD_BUFFERED, FILE_ANY_ACCESS)
-constexpr DWORD IOCTL_ADAPT_SEND_EP0_CONTROL_TRANSFER = 0x220020;
-constexpr DWORD IOCTL_ADAPT_SEND_NON_EP0_TRANSFER = 0x220024;
+// Classic ezusb.sys IOCTLs (Ezusb_IOCTL_INDEX 0x0800)
+constexpr DWORD IOCTL_EZUSB_GET_DEVICE_DESCRIPTOR = 0x222004;
+constexpr DWORD IOCTL_EZUSB_VENDOR_REQUEST = 0x222014;
+constexpr DWORD IOCTL_EZUSB_ANCHOR_DOWNLOAD_BUF = 0x22201C;
+constexpr DWORD IOCTL_EZUSB_BULK_READ = 0x22204E;
+constexpr DWORD IOCTL_EZUSB_BULK_WRITE = 0x222051;
+constexpr DWORD IOCTL_EZUSB_ANCHOR_DOWNLOAD = 0x22206D;
 
-constexpr uint8_t PIPE_INT_OUT = 0x01;
-constexpr uint8_t PIPE_BULK_OUT = 0x02;
-constexpr uint8_t PIPE_INT_IN = 0x81;
-constexpr uint8_t PIPE_BULK_IN = 0x86;
-
-constexpr uint16_t FX2_VID = 0x04B4;
-constexpr uint16_t FX2_PID = 0x8613;
+constexpr uint16_t EZUSB_VID = 0x0547;
+constexpr uint16_t EZUSB_PID = 0x2235;
 
 constexpr size_t EZUSB_PAGESIZE = 62;
 constexpr size_t SECURITY2_NPAGES = 5;
-constexpr size_t MAX_IOCTL_BUFFER = 4096;
+
+enum PipeNum : ULONG {
+    PIPE_INT_OUT = 0,
+    PIPE_INT_IN = 1,
+    PIPE_BULK_OUT = 2,
+    PIPE_BULK_IN = 3,
+};
 
 enum NodeId : uint8_t {
     NODE_NONE = 0x00,
     NODE_SECURITY_PLUG = 0x01,
+    NODE_FPGA_V2 = 0x04,
     NODE_16SEG = 0x05,
     NODE_COIN = 0x09,
     NODE_SECURITY_MEM = 0xFE,
@@ -93,28 +97,21 @@ enum Seg16Cmd : uint8_t {
     SEG16_WRITE = 0x03,
 };
 
+enum FpgaCmd : uint8_t {
+    FPGA_INIT = 0x01,
+    FPGA_CHECK = 0x02,
+    FPGA_WRITE = 0x03,
+    FPGA_WRITE_DONE = 0x04,
+};
+
+enum FpgaStatus : uint8_t {
+    FPGA_INIT_OK = 0x41,
+    FPGA_CHECK_OK = 0x42,
+    FPGA_WRITE_OK = 0x43,
+    FPGA_FAULT = 0xFE,
+};
+
 #pragma pack(push, 1)
-struct SetupPacket {
-    uint8_t bmRequest;
-    uint8_t bRequest;
-    uint16_t wValue;
-    uint16_t wIndex;
-    uint16_t wLength;
-    uint32_t ulTimeOut;
-};
-
-struct SingleTransfer {
-    SetupPacket setup;
-    uint8_t reserved;
-    uint8_t endpoint;
-    uint32_t nt_status;
-    uint32_t usbd_status;
-    uint32_t iso_packet_offset;
-    uint32_t iso_packet_length;
-    uint32_t buffer_offset;
-    uint32_t buffer_length;
-};
-
 struct UsbDeviceDescriptor {
     uint8_t bLength;
     uint8_t bDescriptorType;
@@ -132,46 +129,54 @@ struct UsbDeviceDescriptor {
     uint8_t bNumConfigurations;
 };
 
-struct UsbStringDescriptor {
-    uint8_t length;
-    uint8_t desc_type;
-    uint16_t unicode_str[9];
+struct VendorOrClassRequestControl {
+    uint8_t direction;
+    uint8_t request_type;
+    uint8_t recipient;
+    uint8_t request_type_reserved_bits;
+    uint8_t request;
+    uint16_t value;
+    uint16_t index;
 };
 
+struct AnchorDownloadControl {
+    uint16_t offset;
+};
+
+struct BulkTransferControl {
+    ULONG pipe_num;
+};
+
+// ezusb-iidx interrupt packets (not FX2 64-byte framing)
 struct InterruptWritePacket {
-    uint8_t unk0;
-    uint8_t unk1;
+    uint16_t deck_lights;
     uint8_t node;
     uint8_t cmd;
     uint8_t cmd_detail[2];
-    uint8_t unk2;
-    uint8_t unk3;
     uint8_t panel_lights;
-    uint8_t unk4;
-    uint8_t unk5;
-    uint16_t deck_lights;
-    uint8_t unk6;
+    uint8_t unk0;
     uint8_t top_lamps;
     uint8_t top_neons;
-    uint8_t seg16[9];
-    uint8_t padding[39];
+    uint8_t fpga_run;
+    uint8_t unk2;
+    uint8_t unk3;
+    uint8_t unk4;
+    uint8_t unk5;
+    uint8_t unk6;
 };
 
 struct InterruptReadPacket {
+    uint32_t inverted_pad;
+    uint8_t status;
     uint8_t unk0;
     uint8_t unk1;
-    uint8_t unk2;
-    uint8_t seq_no;
-    uint8_t status;
-    uint8_t unk3;
-    uint8_t unk4;
-    uint8_t unk5;
-    uint32_t inverted_pad;
-    uint8_t unk6;
     uint8_t p2_turntable;
     uint8_t p1_turntable;
+    uint8_t seq_no;
+    uint8_t fpga2_check_flag_unkn;
+    uint8_t fpga_write_ready;
+    uint8_t serial_io_busy_flag;
     uint8_t sliders[3];
-    uint8_t padding[46];
 };
 
 struct BulkPacket {
@@ -192,8 +197,8 @@ struct Rp2Eeprom {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(InterruptWritePacket) == 64, "FX2 write packet size");
-static_assert(sizeof(InterruptReadPacket) == 64, "FX2 read packet size");
+static_assert(sizeof(UsbDeviceDescriptor) == 18, "USB device descriptor size");
+static_assert(sizeof(VendorOrClassRequestControl) == 10, "vendor request size");
 static_assert(sizeof(SecurityId) == 10, "security id size");
 
 // Preloaded GOLD IO2 security memory (from bemanitools node-security-mem.c)
@@ -452,25 +457,49 @@ uint8_t process_coin(uint8_t cmd) {
     return COIN_FAULT;
 }
 
-uint8_t process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
-    switch (node) {
-        case NODE_NONE:
-            return 0;
-        case NODE_SECURITY_PLUG:
-            return process_secplug(cmd, d0);
-        case NODE_SECURITY_MEM:
-            return process_secmem(cmd);
-        case NODE_COIN:
-            return process_coin(cmd);
-        case NODE_16SEG:
-            return (cmd == SEG16_WRITE) ? 0x00 : 0xFE;
+uint8_t process_fpga(uint8_t cmd) {
+    switch (cmd) {
+        case FPGA_INIT:
+            return FPGA_INIT_OK;
+        case FPGA_CHECK:
+            return FPGA_CHECK_OK;
+        case FPGA_WRITE:
+        case FPGA_WRITE_DONE:
+            return FPGA_WRITE_OK;
         default:
-            log_warning("iidx::ezusb2", "unknown node {:02x}", node);
-            return 0xFE;
+            log_warning("iidx::ezusb2", "unknown fpga cmd {:02x}", cmd);
+            return FPGA_FAULT;
     }
 }
 
-uint32_t build_fx2_pad() {
+bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
+    switch (node) {
+        case NODE_NONE:
+            g_status = 0;
+            return true;
+        case NODE_SECURITY_PLUG:
+            g_status = process_secplug(cmd, d0);
+            return true;
+        case NODE_SECURITY_MEM:
+            g_status = process_secmem(cmd);
+            return true;
+        case NODE_COIN:
+            g_status = process_coin(cmd);
+            return true;
+        case NODE_16SEG:
+            g_status = (cmd == SEG16_WRITE) ? 0x00 : 0xFE;
+            return true;
+        case NODE_FPGA_V2:
+            g_status = process_fpga(cmd);
+            return true;
+        default:
+            log_warning("iidx::ezusb2", "unknown node {:02x}", node);
+            return false;
+    }
+}
+
+// ezusb-iidx pad packing (keys<<8, panel<<24, sys<<28, coin-mech<<22)
+uint32_t build_iidx_pad() {
     uint32_t panel = 0;
     uint32_t sys = 0;
     uint32_t keys = 0;
@@ -504,42 +533,49 @@ uint32_t build_fx2_pad() {
     if (pressed(Buttons::P2_6)) keys |= 1u << 12;
     if (pressed(Buttons::P2_7)) keys |= 1u << 13;
 
-    // Match iidxhook3 interrupt pad packing, then invert
-    uint32_t pad = ((keys & 0x3FFFu) << 16)
-            | (panel & 0x0Fu)
-            | ((sys & 0x07u) << 4)
-            | (((sys >> 2) & 0x01u) << 30);
+    uint32_t pad = ((keys & 0x3FFFu) << 8)
+            | ((panel & 0x0Fu) << 24)
+            | ((sys & 0x07u) << 28)
+            | (((sys >> 2) & 0x01u) << 22);
+
+    // Coin mode state in bit 31 (mode1 -> 0, mode2 -> 1)
+    pad &= ~(1u << 31);
+    if (g_coin_mode == 1) {
+        pad |= (1u << 31);
+    }
     return ~pad;
 }
 
-bool interrupt_read(uint8_t *payload, size_t nbytes, size_t *written) {
-    if (nbytes < sizeof(InterruptReadPacket)) {
+bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
+    if (nOutBufferSize < sizeof(InterruptReadPacket) || !lpOutBuffer) {
         return false;
     }
 
     InterruptReadPacket msg {};
-    msg.p1_turntable = get_tt(0, false);
+    msg.inverted_pad = build_iidx_pad();
+    msg.status = g_status;
+    g_status = 0;
     msg.p2_turntable = get_tt(1, false);
+    msg.p1_turntable = get_tt(0, false);
+    msg.seq_no = g_seq_no++;
+    msg.fpga2_check_flag_unkn = 2;
+    msg.fpga_write_ready = 1;
+    msg.serial_io_busy_flag = 0;
     msg.sliders[0] = static_cast<uint8_t>((get_slider(1) << 4) | get_slider(0));
     msg.sliders[1] = static_cast<uint8_t>((get_slider(3) << 4) | get_slider(2));
     msg.sliders[2] = get_slider(4);
-    msg.inverted_pad = build_fx2_pad();
-    msg.status = g_status;
-    g_status = 0;
-    msg.seq_no = g_seq_no++;
 
-    memcpy(payload, &msg, sizeof(msg));
-    *written = sizeof(msg);
+    memcpy(lpOutBuffer, &msg, sizeof(msg));
     return true;
 }
 
-bool interrupt_write(const uint8_t *payload, size_t nbytes) {
-    if (nbytes < sizeof(InterruptWritePacket)) {
+bool interrupt_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
+    if (nOutBufferSize < sizeof(InterruptWritePacket) || !lpOutBuffer) {
         return false;
     }
 
     InterruptWritePacket msg {};
-    memcpy(&msg, payload, sizeof(msg));
+    memcpy(&msg, lpOutBuffer, sizeof(msg));
 
     write_lamp(msg.deck_lights);
     write_led(msg.panel_lights);
@@ -550,24 +586,15 @@ bool interrupt_write(const uint8_t *payload, size_t nbytes) {
     }
 
     g_cur_node = msg.node;
-    switch (msg.node) {
-        case NODE_NONE:
-        case NODE_SECURITY_PLUG:
-        case NODE_SECURITY_MEM:
-        case NODE_COIN:
-        case NODE_16SEG:
-            g_status = process_node_cmd(msg.node, msg.cmd, msg.cmd_detail[0],
-                    msg.cmd_detail[1]);
-            return true;
-        default:
-            g_cur_node = 0;
-            log_warning("iidx::ezusb2", "unrecognised node {:02x}", msg.node);
-            return false;
+    if (!process_node_cmd(msg.node, msg.cmd, msg.cmd_detail[0], msg.cmd_detail[1])) {
+        g_cur_node = 0;
+        return false;
     }
+    return true;
 }
 
-bool bulk_read(uint8_t *payload, size_t nbytes, size_t *written) {
-    if (nbytes < sizeof(BulkPacket)) {
+bool bulk_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
+    if (nOutBufferSize < sizeof(BulkPacket) || !lpOutBuffer) {
         return false;
     }
 
@@ -580,24 +607,25 @@ bool bulk_read(uint8_t *payload, size_t nbytes, size_t *written) {
             break;
         case NODE_SECURITY_MEM:
         case NODE_NONE:
+        case NODE_FPGA_V2:
+            // FPGA/security-mem stub: empty page
             break;
         default:
             log_warning("iidx::ezusb2", "bulk read unsupported on node {:02x}", g_cur_node);
             return false;
     }
 
-    memcpy(payload, &pkg, sizeof(pkg));
-    *written = sizeof(pkg);
+    memcpy(lpOutBuffer, &pkg, sizeof(pkg));
     return true;
 }
 
-bool bulk_write(const uint8_t *payload, size_t nbytes) {
-    if (nbytes < sizeof(BulkPacket)) {
+bool bulk_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
+    if (nOutBufferSize < sizeof(BulkPacket) || !lpOutBuffer) {
         return false;
     }
 
     BulkPacket pkg {};
-    memcpy(&pkg, payload, sizeof(pkg));
+    memcpy(&pkg, lpOutBuffer, sizeof(pkg));
 
     switch (pkg.node) {
         case NODE_SECURITY_MEM:
@@ -609,6 +637,8 @@ bool bulk_write(const uint8_t *payload, size_t nbytes) {
         case NODE_SECURITY_PLUG:
         case NODE_NONE:
         case NODE_16SEG:
+        case NODE_FPGA_V2:
+            // accept and discard FPGA firmware pages
             return true;
         default:
             log_warning("iidx::ezusb2", "bulk write unsupported on node {:02x}", pkg.node);
@@ -616,62 +646,95 @@ bool bulk_write(const uint8_t *payload, size_t nbytes) {
     }
 }
 
-bool ioctl_ep0(SingleTransfer *req, const uint8_t *write, size_t write_len,
-        uint8_t *read, size_t read_len, size_t *read_pos) {
-    if (req->setup.bmRequest == 0x80 && req->setup.bRequest == 0x06) {
-        if (req->setup.wValue == 0x0100) {
-            if (read_len < sizeof(UsbDeviceDescriptor)) {
-                return false;
-            }
-            UsbDeviceDescriptor desc {};
-            desc.bLength = sizeof(desc);
-            desc.bDescriptorType = 0x01;
-            desc.idVendor = FX2_VID;
-            desc.idProduct = FX2_PID;
-            memcpy(read, &desc, sizeof(desc));
-            *read_pos = sizeof(desc);
-            return true;
-        }
-        if (req->setup.wValue == 0x0301) {
-            if (read_len < sizeof(UsbStringDescriptor)) {
-                return false;
-            }
-            UsbStringDescriptor desc {};
-            desc.length = sizeof(desc);
-            desc.desc_type = 0x03;
-            memcpy(desc.unicode_str, L"KONAMI", 12);
-            memcpy(read, &desc, sizeof(desc));
-            *read_pos = sizeof(desc);
-            return true;
-        }
-        log_warning("iidx::ezusb2", "unsupported EP0 GET {:04x}", req->setup.wValue);
-        return false;
+int ioctl_get_device_descriptor(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
+    if (nOutBufferSize < sizeof(UsbDeviceDescriptor) || !lpOutBuffer) {
+        return -1;
     }
 
-    if (req->setup.bmRequest == 0x40 && req->setup.bRequest == 0xA0) {
-        // reset / firmware download — accept and ignore payload
-        return true;
-    }
-
-    log_warning("iidx::ezusb2", "invalid EP0 {:02x}/{:02x}",
-            req->setup.bmRequest, req->setup.bRequest);
-    return false;
+    UsbDeviceDescriptor desc {};
+    desc.bLength = sizeof(desc);
+    desc.bDescriptorType = 0x01;
+    desc.idVendor = EZUSB_VID;
+    desc.idProduct = EZUSB_PID;
+    memcpy(lpOutBuffer, &desc, sizeof(desc));
+    return static_cast<int>(sizeof(desc));
 }
 
-bool ioctl_epx(SingleTransfer *req, const uint8_t *write, size_t write_len,
-        uint8_t *read, size_t read_len, size_t *read_pos) {
-    switch (req->endpoint) {
-        case PIPE_INT_OUT:
-            return interrupt_write(write, write_len);
-        case PIPE_BULK_OUT:
-            return bulk_write(write, write_len);
+int ioctl_vendor_request(LPVOID lpInBuffer, DWORD nInBufferSize) {
+    if (nInBufferSize < sizeof(VendorOrClassRequestControl) || !lpInBuffer) {
+        return -1;
+    }
+
+    auto *vc = reinterpret_cast<VendorOrClassRequestControl *>(lpInBuffer);
+    if (vc->request == 0x00 && vc->value == 0x0001 && vc->index == 0x0100) {
+        log_info("iidx::ezusb2", "vendor req: reset hold");
+        return 0;
+    }
+    if (vc->request == 0x00 && vc->value == 0x0001 && vc->index == 0x0000) {
+        log_info("iidx::ezusb2", "vendor req: reset release");
+        return 0;
+    }
+
+    log_warning("iidx::ezusb2", "unknown vendor req {:02x} value {:04x} index {:04x}",
+            vc->request, vc->value, vc->index);
+    return 0;
+}
+
+int ioctl_anchor_download(LPVOID lpInBuffer, DWORD nInBufferSize,
+        DWORD nOutBufferSize) {
+    if (nInBufferSize < sizeof(AnchorDownloadControl) || !lpInBuffer) {
+        return -1;
+    }
+    // Accept firmware chunk; do not execute it
+    return static_cast<int>(nOutBufferSize);
+}
+
+int ioctl_pipe_read(LPVOID lpInBuffer, DWORD nInBufferSize,
+        LPVOID lpOutBuffer, DWORD nOutBufferSize) {
+    if (nInBufferSize < sizeof(BulkTransferControl) || !lpInBuffer) {
+        return -1;
+    }
+
+    auto *ctl = reinterpret_cast<BulkTransferControl *>(lpInBuffer);
+    switch (ctl->pipe_num) {
         case PIPE_INT_IN:
-            return interrupt_read(read, read_len, read_pos);
+            if (!interrupt_read(lpOutBuffer, nOutBufferSize)) {
+                return -1;
+            }
+            return static_cast<int>(nOutBufferSize);
         case PIPE_BULK_IN:
-            return bulk_read(read, read_len, read_pos);
+            if (!bulk_read(lpOutBuffer, nOutBufferSize)) {
+                return -1;
+            }
+            return static_cast<int>(nOutBufferSize);
         default:
-            log_warning("iidx::ezusb2", "unhandled endpoint {:02x}", req->endpoint);
-            return false;
+            log_warning("iidx::ezusb2", "no such read pipe {}", ctl->pipe_num);
+            return -1;
+    }
+}
+
+int ioctl_pipe_write(LPVOID lpInBuffer, DWORD nInBufferSize,
+        LPVOID lpOutBuffer, DWORD nOutBufferSize) {
+    if (nInBufferSize < sizeof(BulkTransferControl) || !lpInBuffer) {
+        return -1;
+    }
+
+    auto *ctl = reinterpret_cast<BulkTransferControl *>(lpInBuffer);
+    // METHOD_IN_DIRECT: payload is in lpOutBuffer (bemani/ezusb quirk)
+    switch (ctl->pipe_num) {
+        case PIPE_INT_OUT:
+            if (!interrupt_write(lpOutBuffer, nOutBufferSize)) {
+                return -1;
+            }
+            return static_cast<int>(nOutBufferSize);
+        case PIPE_BULK_OUT:
+            if (!bulk_write(lpOutBuffer, nOutBufferSize)) {
+                return -1;
+            }
+            return static_cast<int>(nOutBufferSize);
+        default:
+            log_warning("iidx::ezusb2", "no such write pipe {}", ctl->pipe_num);
+            return -1;
     }
 }
 
@@ -696,44 +759,27 @@ bool EZUSB2Handle::close() {
 int EZUSB2Handle::device_io(DWORD dwIoControlCode, LPVOID lpInBuffer, DWORD nInBufferSize,
         LPVOID lpOutBuffer, DWORD nOutBufferSize) {
 
-    if (dwIoControlCode != IOCTL_ADAPT_SEND_EP0_CONTROL_TRANSFER
-            && dwIoControlCode != IOCTL_ADAPT_SEND_NON_EP0_TRANSFER) {
-        log_warning("iidx::ezusb2", "unknown ioctl {:08x}", dwIoControlCode);
-        return -1;
-    }
+    switch (dwIoControlCode) {
+        case IOCTL_EZUSB_GET_DEVICE_DESCRIPTOR:
+            return ioctl_get_device_descriptor(lpOutBuffer, nOutBufferSize);
 
-    const DWORD nbytes = (nInBufferSize > nOutBufferSize) ? nInBufferSize : nOutBufferSize;
-    if (nbytes < sizeof(SingleTransfer) || nbytes > MAX_IOCTL_BUFFER) {
-        return -1;
-    }
+        case IOCTL_EZUSB_VENDOR_REQUEST:
+            return ioctl_vendor_request(lpInBuffer, nInBufferSize);
 
-    uint8_t local[MAX_IOCTL_BUFFER] {};
-    if (lpInBuffer && nInBufferSize > 0) {
-        memcpy(local, lpInBuffer, nInBufferSize);
-    } else if (lpOutBuffer && nOutBufferSize > 0) {
-        memcpy(local, lpOutBuffer, nOutBufferSize);
-    }
+        case IOCTL_EZUSB_ANCHOR_DOWNLOAD:
+        case IOCTL_EZUSB_ANCHOR_DOWNLOAD_BUF:
+            return ioctl_anchor_download(lpInBuffer, nInBufferSize, nOutBufferSize);
 
-    auto *req = reinterpret_cast<SingleTransfer *>(local);
-    uint8_t *payload = local + sizeof(SingleTransfer);
-    const size_t payload_len = nbytes - sizeof(SingleTransfer);
-    size_t read_pos = 0;
+        case IOCTL_EZUSB_BULK_READ:
+            return ioctl_pipe_read(lpInBuffer, nInBufferSize, lpOutBuffer, nOutBufferSize);
 
-    bool ok = false;
-    if (dwIoControlCode == IOCTL_ADAPT_SEND_EP0_CONTROL_TRANSFER) {
-        ok = ioctl_ep0(req, payload, payload_len, payload, payload_len, &read_pos);
-    } else {
-        ok = ioctl_epx(req, payload, payload_len, payload, payload_len, &read_pos);
-    }
-    if (!ok) {
-        return -1;
-    }
+        case IOCTL_EZUSB_BULK_WRITE:
+            return ioctl_pipe_write(lpInBuffer, nInBufferSize, lpOutBuffer, nOutBufferSize);
 
-    const int result = static_cast<int>(sizeof(SingleTransfer) + read_pos);
-    if (lpOutBuffer && nOutBufferSize > 0) {
-        memcpy(lpOutBuffer, local, (std::min)(nOutBufferSize, static_cast<DWORD>(result)));
+        default:
+            log_warning("iidx::ezusb2", "unknown ioctl {:08x}", dwIoControlCode);
+            return -1;
     }
-    return result;
 }
 
 }

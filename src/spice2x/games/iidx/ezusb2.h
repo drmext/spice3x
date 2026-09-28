@@ -4,7 +4,7 @@
 
 namespace games::iidx {
 
-    // Cypress FX2 / IO2 board used by IIDX Gold through Sirius (iidxhook3).
+    // Sirius JDJ: ezusb.sys transport + ezusb-iidx v2 packets (security plug v2).
     class EZUSB2Handle : public CustomHandle {
     public:
         bool open(LPCWSTR lpFileName) override;

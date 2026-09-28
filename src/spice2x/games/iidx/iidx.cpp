@@ -321,15 +321,16 @@ namespace games::iidx {
 
             const bool is_jdj = avs::game::is_model("JDJ");
 
-            // EZ-USB / FX2 setupapi entry (same GUID for both board generations)
+            // EZ-USB setupapi entry (same GUID for 2235 and FX2 generations)
             SETUPAPI_SETTINGS settings1 {};
             settings1.class_guid[0] = 0xAE18AA60;
             settings1.class_guid[1] = 0x11D47F6A;
             settings1.class_guid[2] = 0x0100DD97;
             settings1.class_guid[3] = 0x59B92902;
+            // Sirius uses ezusb.sys + 2235 description; later titles use FX2LP string
             const char property1_old[] = "Cypress EZ-USB (2235 - EEPROM missing)";
-            const char property1_fx2[] = "Cypress EZ-USB FX2LP - EEPROM missing";
-            const char *property1 = is_jdj ? property1_fx2 : property1_old;
+            const char property1_sirius[] = "Cypress EZ-USB (2235) - EEPROM missing";
+            const char *property1 = is_jdj ? property1_sirius : property1_old;
             const char interface_detail1[] = "\\\\.\\Ezusb-0";
             memcpy(settings1.property_devicedesc, property1, strlen(property1) + 1);
             memcpy(settings1.interface_detail, interface_detail1, sizeof(interface_detail1));
@@ -338,7 +339,7 @@ namespace games::iidx {
 
             devicehook_init();
             if (is_jdj) {
-                // Sirius uses the FX2 IO2 protocol and round-plug v2
+                // Sirius: ezusb.sys ioctls, ezusb-iidx v2 packets, round-plug v2
                 devicehook_add(new EZUSB2Handle());
                 // Patch the exe IAT after threads resume (PEB walk skips it)
                 devicehook_init_module(avs::game::DLL_INSTANCE);
