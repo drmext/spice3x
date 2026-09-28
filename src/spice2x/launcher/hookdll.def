@@ -1,6 +1,6 @@
 LIBRARY spicehook
 
 EXPORTS
-    ; undecorated name -> stdcall symbol. A bare "spice_exe_init" line does
-    ; not match _spice_exe_init@4, and ld then emits RVA 0xD0000000.
-    spice_exe_init=_spice_exe_init@4
+    ; MSVC only. MinGW does not link this file: the decorated stdcall symbol is
+    ; hidden in release builds, and ld then reports it as not defined.
+    spice_exe_init

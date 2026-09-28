@@ -820,15 +820,22 @@ endif()
 ##############################################################################
 
 add_library(spicetools_spice_hook SHARED
-        launcher/hookdll.cpp
-        launcher/hookdll.def)
+        launcher/hookdll.cpp)
+if(MSVC)
+    target_sources(spicetools_spice_hook PRIVATE launcher/hookdll.def)
+endif()
 target_link_libraries(spicetools_spice_hook PRIVATE spicetools_spice_objs shell32)
 set_target_properties(spicetools_spice_hook PROPERTIES PREFIX "" OUTPUT_NAME "spicehook")
 # Prefer a high image base so LoadLibrary rebases away from bm2dx.exe @ 0x400000.
+# kill-at: export name is spice_exe_init, not spice_exe_init@4.
+# exclude-all-symbols: do not export the hidden-visibility object library.
 if(NOT MSVC)
+    set(SPICEHOOK_LDFLAGS "-m32 -Wl,--disable-dynamicbase")
+    string(APPEND SPICEHOOK_LDFLAGS ",--image-base=0x30000000")
+    string(APPEND SPICEHOOK_LDFLAGS ",--kill-at,--exclude-all-symbols")
     set_target_properties(spicetools_spice_hook PROPERTIES
             COMPILE_FLAGS "-m32 -mstackrealign"
-            LINK_FLAGS "-m32 -Wl,--disable-dynamicbase,--image-base=0x30000000,--exclude-all-symbols")
+            LINK_FLAGS "${SPICEHOOK_LDFLAGS}")
 endif()
 
 # Copy to a stable path and generate an RC that embeds it as RCDATA.
