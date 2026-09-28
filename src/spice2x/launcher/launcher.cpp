@@ -1941,6 +1941,11 @@ int main_implementation(int argc, char *argv[]) {
         eamuse_autodetect_game();
         log_info("launcher", "injected game identity {}", avs::game::get_identifier());
 
+        // Match bm2dx.dll IIDX path: show cursor in windowed mode
+        if (GRAPHICS_WINDOWED) {
+            GRAPHICS_SHOW_CURSOR = true;
+        }
+
         // Bind already-loaded libavs-win32*.dll imports (static imports of the exe)
         avs::core::load_dll();
         avs::ea3::load_dll();

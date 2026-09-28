@@ -631,6 +631,20 @@ static HWND WINAPI CreateWindowExA_hook(DWORD dwExStyle, LPCSTR lpClassName, LPC
             fmt::ptr(hInstance),
             fmt::ptr(lpParam));
 
+    // IIDX 17 Sirius creates a WS_POPUP window; give it a normal frame under -w
+    // so it matches other IIDX windowed builds. Skip nWidth==0 system windows.
+    if (GRAPHICS_WINDOWED && avs::game::is_model("JDJ") && nWidth > 0) {
+        dwExStyle = 0;
+        dwStyle &= ~WS_POPUP;
+        dwStyle |= WS_OVERLAPPEDWINDOW;
+
+        RECT rect {};
+        SetRect(&rect, 0, 0, nWidth, nHeight);
+        AdjustWindowRect(&rect, dwStyle, (hMenu != nullptr));
+        nWidth = rect.right - rect.left;
+        nHeight = rect.bottom - rect.top;
+    }
+
     // gfdm
     std::string effective_window_name = window_name;
     if (avs::game::is_model({"J32", "J33", "K32", "K33", "L32", "L33", "M32"})) {

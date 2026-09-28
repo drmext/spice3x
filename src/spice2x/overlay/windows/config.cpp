@@ -23,6 +23,7 @@
 #include "avs/ea3.h"
 #include "avs/game.h"
 #include "light_match_map.h"
+#include "launcher/exe_inject.h"
 #include "launcher/launcher.h"
 #include "launcher/options.h"
 #include "misc/eamuse.h"
@@ -146,6 +147,7 @@ namespace overlay::windows {
 
             // standalone configurator should look for file hints
             if (cfg::CONFIGURATOR_STANDALONE) {
+                bool selected = false;
                 const auto file_hints = games::get_game_file_hints(game_name);
                 if (file_hints) {
                     for (auto &file_hint_list : *file_hints) {
@@ -168,9 +170,18 @@ namespace overlay::windows {
                             this->games_selected = games_list.size() - 1;
                             this->games_selected_name = game_name;
                             eamuse_set_game(game_name);
+                            selected = true;
                             break;
                         }
                     }
+                }
+
+                // IIDX 17 Sirius: no bm2dx.dll; detect via sidcode.txt + date/bm2dx.exe
+                if (!selected && game_name == "Beatmania IIDX"
+                        && launcher::try_detect_jdj()) {
+                    this->games_selected = games_list.size() - 1;
+                    this->games_selected_name = game_name;
+                    eamuse_set_game(game_name);
                 }
             }
         }
