@@ -29,6 +29,7 @@ constexpr uint16_t EZUSB_PID = 0x2235;
 constexpr size_t EZUSB_PAGESIZE = 62;
 constexpr size_t SECURITY2_NPAGES = 5;
 constexpr size_t SRAM_NPAGES = 12;
+constexpr size_t EEPROM_NPAGES = 3;
 
 enum PipeNum : ULONG {
     PIPE_INT_OUT = 0,
@@ -40,9 +41,11 @@ enum PipeNum : ULONG {
 enum NodeId : uint8_t {
     NODE_NONE = 0x00,
     NODE_SECURITY_PLUG = 0x01,
+    NODE_EEPROM = 0x02,
     NODE_FPGA_V2 = 0x04,
     NODE_16SEG = 0x05,
     NODE_COIN = 0x09,
+    NODE_WDT = 0x0C,
     NODE_SRAM = 0x40,
     NODE_SECURITY_MEM = 0xFE,
 };
@@ -117,6 +120,26 @@ enum SramCmd : uint8_t {
     SRAM_CMD_READ = 0x02,
     SRAM_CMD_WRITE = 0x03,
     SRAM_CMD_DONE = 0x04,
+};
+
+enum EepromCmd : uint8_t {
+    EEPROM_CMD_READ = 0x02,
+    EEPROM_CMD_WRITE = 0x03,
+};
+
+enum EepromStatus : uint8_t {
+    EEPROM_READ_OK = 0x21,
+    EEPROM_WRITE_OK = 0x22,
+    EEPROM_FAULT = 0xFE,
+};
+
+enum WdtCmd : uint8_t {
+    WDT_CMD_INIT = 0x3C,
+};
+
+enum WdtStatus : uint8_t {
+    WDT_OK = 0x00,
+    WDT_FAULT = 0xFE,
 };
 
 #pragma pack(push, 1)
@@ -247,6 +270,18 @@ uint8_t g_rom_seed = 0;
 uint8_t g_sram[EZUSB_PAGESIZE * SRAM_NPAGES] {};
 uint8_t g_sram_last_cmd = 0;
 int g_sram_read_page = 0;
+
+uint8_t g_eeprom[EZUSB_PAGESIZE * EEPROM_NPAGES];
+uint8_t g_eeprom_read_page = 0;
+bool g_eeprom_ready = false;
+
+void ensure_eeprom() {
+    if (g_eeprom_ready) {
+        return;
+    }
+    memset(g_eeprom, 0xFF, sizeof(g_eeprom));
+    g_eeprom_ready = true;
+}
 
 constexpr char kBlackSignKey[8] = {'2', 'D', 'X', 'G', 'L', 'D', 'A', 'C'};
 constexpr char kWhiteSignKey[8] = {'E', '-', 'A', 'M', 'U', 'S', 'E', '3'};
@@ -503,6 +538,28 @@ uint8_t process_sram(uint8_t cmd) {
     return 0;
 }
 
+uint8_t process_eeprom(uint8_t cmd) {
+    ensure_eeprom();
+    switch (cmd) {
+        case EEPROM_CMD_READ:
+            g_eeprom_read_page = 0;
+            return EEPROM_READ_OK;
+        case EEPROM_CMD_WRITE:
+            return EEPROM_WRITE_OK;
+        default:
+            log_warning("iidx::ezusb2", "unknown eeprom cmd {:02x}", cmd);
+            return EEPROM_FAULT;
+    }
+}
+
+uint8_t process_wdt(uint8_t cmd) {
+    if (cmd == WDT_CMD_INIT) {
+        return WDT_OK;
+    }
+    log_warning("iidx::ezusb2", "unknown wdt cmd {:02x}", cmd);
+    return WDT_FAULT;
+}
+
 bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
     switch (node) {
         case NODE_NONE:
@@ -525,6 +582,12 @@ bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
             return true;
         case NODE_SRAM:
             g_status = process_sram(cmd);
+            return true;
+        case NODE_EEPROM:
+            g_status = process_eeprom(cmd);
+            return true;
+        case NODE_WDT:
+            g_status = process_wdt(cmd);
             return true;
         default:
             log_warning("iidx::ezusb2", "unknown node {:02x}", node);
@@ -655,10 +718,24 @@ bool bulk_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
             memcpy(pkg.payload, g_sram + g_sram_read_page * EZUSB_PAGESIZE, EZUSB_PAGESIZE);
             g_sram_read_page++;
             break;
+        case NODE_EEPROM: {
+            ensure_eeprom();
+            if (g_eeprom_read_page >= EEPROM_NPAGES) {
+                log_warning("iidx::ezusb2", "eeprom read overrun");
+                return false;
+            }
+            // Game only accepts pages whose node byte is 0x22
+            pkg.node = 0x22;
+            pkg.page = g_eeprom_read_page;
+            memcpy(pkg.payload, g_eeprom + g_eeprom_read_page * EZUSB_PAGESIZE, EZUSB_PAGESIZE);
+            g_eeprom_read_page++;
+            break;
+        }
         case NODE_SECURITY_MEM:
         case NODE_NONE:
         case NODE_FPGA_V2:
-            // FPGA/security-mem stub: empty page
+        case NODE_WDT:
+            // FPGA/security-mem/wdt stub: empty page
             break;
         default:
             log_warning("iidx::ezusb2", "bulk read unsupported on node {:02x}", g_cur_node);
@@ -691,11 +768,20 @@ bool bulk_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
             }
             memcpy(g_sram + pkg.page * EZUSB_PAGESIZE, pkg.payload, EZUSB_PAGESIZE);
             return true;
+        case NODE_EEPROM:
+            ensure_eeprom();
+            if (pkg.page >= EEPROM_NPAGES) {
+                log_warning("iidx::ezusb2", "eeprom write overrun page {:02x}", pkg.page);
+                return false;
+            }
+            memcpy(g_eeprom + pkg.page * EZUSB_PAGESIZE, pkg.payload, EZUSB_PAGESIZE);
+            return true;
         case NODE_SECURITY_PLUG:
         case NODE_NONE:
         case NODE_16SEG:
         case NODE_FPGA_V2:
-            // accept and discard FPGA firmware pages
+        case NODE_WDT:
+            // accept and discard FPGA firmware / wdt pages
             return true;
         default:
             log_warning("iidx::ezusb2", "bulk write unsupported on node {:02x}", pkg.node);

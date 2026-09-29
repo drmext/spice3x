@@ -1,5 +1,6 @@
 #include "handle.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "acioemu/device.h"
@@ -94,6 +95,35 @@ size_t acioemu::ACIOHandle::legacy_next_frame_size() const {
     return i - frame_start;
 }
 
+bool acioemu::ACIOHandle::legacy_ensure_frame() {
+    legacy_drain_emu();
+
+    if (legacy_frame_left > 0) {
+        // Mid-frame delivery: remaining bytes are already at the front
+        return legacy_pending.size() >= legacy_frame_left;
+    }
+
+    // Drop leading junk before SOF SOF
+    while (legacy_pending.size() >= 2
+            && !(legacy_pending[0] == ACIO_SOF && legacy_pending[1] == ACIO_SOF)) {
+        legacy_pending.erase(legacy_pending.begin());
+    }
+
+    const size_t frame_size = legacy_next_frame_size();
+    if (frame_size == 0) {
+        return false;
+    }
+
+    // Drop any junk before the frame so it sits at index 0
+    while (legacy_pending.size() >= 2
+            && !(legacy_pending[0] == ACIO_SOF && legacy_pending[1] == ACIO_SOF)) {
+        legacy_pending.erase(legacy_pending.begin());
+    }
+
+    legacy_frame_left = frame_size;
+    return true;
+}
+
 int acioemu::ACIOHandle::read(LPVOID lpBuffer, DWORD nNumberOfBytesToRead) {
     auto buffer = reinterpret_cast<uint8_t *>(lpBuffer);
 
@@ -113,24 +143,18 @@ int acioemu::ACIOHandle::read(LPVOID lpBuffer, DWORD nNumberOfBytesToRead) {
         return (int) bytes_read;
     }
 
-    // Old libacio (Sirius / iidxhook3): one framed message per ReadFile
-    legacy_drain_emu();
-
-    // Drop leading junk before SOF SOF
-    while (legacy_pending.size() >= 2
-            && !(legacy_pending[0] == ACIO_SOF && legacy_pending[1] == ACIO_SOF)) {
-        legacy_pending.erase(legacy_pending.begin());
-    }
-
-    const size_t frame_size = legacy_next_frame_size();
-    if (frame_size == 0 || frame_size > nNumberOfBytesToRead) {
+    // Old libacio reads in short chunks; deliver a prefix of one frame and
+    // keep the rest for the next ReadFile. Do not start a second frame here.
+    if (!legacy_ensure_frame() || nNumberOfBytesToRead == 0) {
         return 0;
     }
 
-    memcpy(buffer, legacy_pending.data(), frame_size);
+    const size_t n = (std::min)(static_cast<size_t>(nNumberOfBytesToRead), legacy_frame_left);
+    memcpy(buffer, legacy_pending.data(), n);
     legacy_pending.erase(legacy_pending.begin(),
-            legacy_pending.begin() + static_cast<std::ptrdiff_t>(frame_size));
-    return static_cast<int>(frame_size);
+            legacy_pending.begin() + static_cast<std::ptrdiff_t>(n));
+    legacy_frame_left -= n;
+    return static_cast<int>(n);
 }
 
 int acioemu::ACIOHandle::write(LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite) {
@@ -160,18 +184,16 @@ size_t acioemu::ACIOHandle::bytes_available() {
         return acio_emu.bytes_available();
     }
 
-    legacy_drain_emu();
-    const size_t frame_size = legacy_next_frame_size();
-    if (frame_size > 0) {
-        return frame_size;
+    if (!legacy_ensure_frame()) {
+        return 0;
     }
-    // Hold a partial frame until it completes; report nothing yet
-    return 0;
+    return legacy_frame_left;
 }
 
 bool acioemu::ACIOHandle::close() {
     log_info("acioemu", "Closed {} (ACIO)", ws2s(com_port));
     legacy_pending.clear();
+    legacy_frame_left = 0;
 
     return true;
 }

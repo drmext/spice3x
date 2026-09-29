@@ -18,12 +18,18 @@ namespace acioemu {
         // Staged escaped bytes for legacy one-frame-per-ReadFile mode
         std::vector<uint8_t> legacy_pending;
 
+        // Bytes still left of the current complete frame at the front of pending
+        size_t legacy_frame_left = 0;
+
         acioemu::ACIOEmu acio_emu;
 
         void legacy_drain_emu();
 
         // Size of the first complete framed message in legacy_pending, or 0
         size_t legacy_next_frame_size() const;
+
+        // Ensure legacy_frame_left reflects a complete frame at pending[0]
+        bool legacy_ensure_frame();
 
     public:
         ACIOHandle(LPCWSTR lpCOMPort, uint8_t iccaNodeCount = 2, bool legacyMode = false);
