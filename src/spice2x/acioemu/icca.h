@@ -24,10 +24,9 @@ namespace acioemu {
         uint8_t *status;
         bool *accept;
         bool *hold;
-        uint8_t *keydown;
         uint16_t *keypad;
-        bool **keypad_last;
-        uint8_t *keypad_capture;
+        uint16_t *last_keypad;
+        uint8_t (*key_events)[2];
         std::optional<Crypt> *crypt;
         uint8_t *counter;
 
@@ -38,7 +37,7 @@ namespace acioemu {
         bool parse_msg(MessageData *msg_in, circular_buffer<uint8_t> *response_buffer) override;
 
         void update_card(int unit);
-        void update_keypad(int unit, bool update_edge);
+        void update_keypad(int unit);
         void update_status(int unit);
     };
 }

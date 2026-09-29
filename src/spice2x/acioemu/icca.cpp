@@ -28,16 +28,9 @@ ICCADevice::ICCADevice(bool flip_order, bool keypad_thread, uint8_t node_count) 
         this->accept[i] = true;
     }
     this->hold = new bool[node_count] {};
-    this->keydown = new uint8_t[node_count] {};
     this->keypad = new uint16_t[node_count] {};
-    this->keypad_last = new bool*[node_count] {};
-    for (int i = 0; i < node_count; i++) {
-        this->keypad_last[i] = new bool[12] {};
-    }
-    this->keypad_capture = new uint8_t[node_count] {};
-    for (int i = 0; i < node_count; i++) {
-        this->keypad_capture[i] = 0x08;
-    }
+    this->last_keypad = new uint16_t[node_count] {};
+    this->key_events = new uint8_t[node_count][2] {};
     this->crypt = new std::optional<Crypt>[node_count] {};
     this->counter = new uint8_t[node_count] {};
     for (int i = 0; i < node_count; i++) {
@@ -45,12 +38,13 @@ ICCADevice::ICCADevice(bool flip_order, bool keypad_thread, uint8_t node_count) 
     }
 
     // keypad thread for faster polling
+    this->keypad_thread = nullptr;
     if (keypad_thread) {
         this->keypad_thread = new std::thread([this]() {
             timeutils::PreciseSleepTimer timer;
             while (this->cards) {
                 for (int unit = 0; unit < this->node_count; unit++) {
-                    this->update_keypad(unit, false);
+                    this->update_keypad(unit);
                 }
                 timer.sleep(7);
             }
@@ -74,10 +68,9 @@ ICCADevice::~ICCADevice() {
     delete[] status;
     delete[] accept;
     delete[] hold;
-    delete[] keydown;
     delete[] keypad;
-    delete[] keypad_last;
-    delete[] keypad_capture;
+    delete[] last_keypad;
+    delete[] key_events;
     delete[] crypt;
     delete[] counter;
 }
@@ -131,7 +124,7 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
 
             // update things
             update_card(unit);
-            update_keypad(unit, true);
+            update_keypad(unit);
             update_status(unit);
 
             // copy status
@@ -179,7 +172,7 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
 
             // update things
             update_card(unit);
-            update_keypad(unit, true);
+            update_keypad(unit);
             update_status(unit);
 
             // copy status
@@ -295,7 +288,7 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
 
             // update things
             update_card(unit);
-            update_keypad(unit, true);
+            update_keypad(unit);
             update_status(unit);
 
             // copy status
@@ -437,52 +430,51 @@ static int KEYPAD_KEY_CODES_ALT[]{
         0x100,  // .
         0x10    // 00
 };
-static uint8_t KEYPAD_KEY_CODE_NUMS[]{
-        0, 1, 5, 9, 2, 6, 10, 3, 7, 11, 8, 4
-};
 
-void ICCADevice::update_keypad(int unit, bool update_edge) {
+void ICCADevice::update_keypad(int unit) {
 
     // lock keypad so threads can't interfere
     std::lock_guard<std::mutex> lock(this->keypad_mutex);
 
-    // reset unit
+    // reset remapped held mask
     this->keypad[unit] = 0;
 
     // get eamu key states
     uint16_t eamu_state = eamuse_get_keypad_state((size_t) unit);
 
-    // iterate keypad
-    bool edge = false;
+    // build remapped key_state for wire buffer[14..15]
     for (int n = 0; n < 12; n++) {
-        int i = n;
-
-        // check if pressed
-        if (eamu_state & (1 << KEYPAD_EAMUSE_MAPPING[i])) {
-
+        if (eamu_state & (1 << KEYPAD_EAMUSE_MAPPING[n])) {
             if (ICCA_DEVICE_HACK) {
-                this->keypad[unit] |= KEYPAD_KEY_CODES_ALT[i];
+                this->keypad[unit] |= KEYPAD_KEY_CODES_ALT[n];
             } else {
-                this->keypad[unit] |= KEYPAD_KEY_CODES[i];
+                this->keypad[unit] |= KEYPAD_KEY_CODES[n];
             }
-
-            if (!this->keypad_last[unit][i] && update_edge) {
-                this->keydown[unit] = (this->keypad_capture[unit] << 4) | KEYPAD_KEY_CODE_NUMS[n];
-                this->keypad_last[unit][i] = true;
-                edge = true;
-            }
-        } else {
-            this->keypad_last[unit][i] = false;
         }
     }
 
-    // update keypad capture
-    if (update_edge && edge) {
-        this->keypad_capture[unit]++;
-        this->keypad_capture[unit] |= 0x08;
-    } else {
-        this->keydown[unit] = 0;
+    // rising edges on raw EAM mask (bemanitools-compatible key_events)
+    uint16_t rise = eamu_state & (this->last_keypad[unit] ^ eamu_state);
+    if (rise) {
+        uint8_t event;
+        if (this->key_events[unit][0]) {
+            event = (uint8_t) ((this->key_events[unit][0] + 0x10) & 0xF0);
+        } else {
+            event = 0x00;
+        }
+
+        unsigned long bit = 0;
+        // lowest set bit index == EAM_IO_KEYPAD_* (Sirius digit map)
+        while (bit < 16 && !(rise & (1u << bit))) {
+            bit++;
+        }
+        event |= (uint8_t) (0x80 | bit);
+
+        this->key_events[unit][1] = this->key_events[unit][0];
+        this->key_events[unit][0] = event;
     }
+
+    this->last_keypad[unit] = eamu_state;
 }
 
 void ICCADevice::update_status(int unit) {
@@ -573,8 +565,8 @@ void ICCADevice::update_status(int unit) {
 
     // other flags
     buffer[11] = 0x03;
-    buffer[12] = keydown[unit];
-    buffer[13] = 0x00;
+    buffer[12] = this->key_events[unit][0];
+    buffer[13] = this->key_events[unit][1];
     buffer[14] = (uint8_t) (keypad[unit] >> 8);
     buffer[15] = (uint8_t) (keypad[unit] & 0xFF);
 }
