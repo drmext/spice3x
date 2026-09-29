@@ -76,14 +76,25 @@ static HICON load_window_icon() {
     return LoadIcon(module, MAKEINTRESOURCE(MAINICON));
 }
 
-static HICON WINDOW_ICON = load_window_icon();
+// Load on first use. Calling LoadIcon from a DLL static initializer runs under
+// the loader lock and the handle it returns makes RegisterClass fail.
+static HICON window_icon() {
+    static bool loaded = false;
+    static HICON icon = nullptr;
+    if (!loaded) {
+        loaded = true;
+        icon = load_window_icon();
+    }
+    return icon;
+}
 
 static void apply_window_icon(HWND hwnd) {
-    if (hwnd == nullptr || WINDOW_ICON == nullptr) {
+    HICON icon = window_icon();
+    if (hwnd == nullptr || icon == nullptr) {
         return;
     }
-    SendMessage(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(WINDOW_ICON));
-    SendMessage(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(WINDOW_ICON));
+    SendMessage(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
+    SendMessage(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
 }
 
 // state
@@ -1260,11 +1271,18 @@ static ATOM WINAPI RegisterClassA_hook(const WNDCLASSA *lpWndClass) {
     }
 
     // copy struct and use own icon
-    WNDCLASSA wnd = *lpWndClass;
-    wnd.hIcon = WINDOW_ICON;
+    HICON icon = window_icon();
+    if (icon) {
+        WNDCLASSA wnd = *lpWndClass;
+        wnd.hIcon = icon;
+        ATOM atom = RegisterClassA_orig(&wnd);
+        if (atom != 0) {
+            return atom;
+        }
+        log_warning("graphics", "RegisterClassA with spice icon failed ({})", GetLastError());
+    }
 
-    // call original
-    return RegisterClassA_orig(&wnd);
+    return RegisterClassA_orig(lpWndClass);
 }
 
 static ATOM WINAPI RegisterClassExA_hook(const WNDCLASSEXA *Arg1) {
@@ -1275,12 +1293,19 @@ static ATOM WINAPI RegisterClassExA_hook(const WNDCLASSEXA *Arg1) {
     }
 
     // copy struct and use own icon
-    WNDCLASSEXA wnd = *Arg1;
-    wnd.hIcon = WINDOW_ICON;
-    wnd.hIconSm = WINDOW_ICON;
+    HICON icon = window_icon();
+    if (icon) {
+        WNDCLASSEXA wnd = *Arg1;
+        wnd.hIcon = icon;
+        wnd.hIconSm = icon;
+        ATOM atom = RegisterClassExA_orig(&wnd);
+        if (atom != 0) {
+            return atom;
+        }
+        log_warning("graphics", "RegisterClassExA with spice icon failed ({})", GetLastError());
+    }
 
-    // call original
-    return RegisterClassExA_orig(&wnd);
+    return RegisterClassExA_orig(Arg1);
 }
 
 static ATOM WINAPI RegisterClassW_hook(const WNDCLASSW *lpWndClass) {
@@ -1291,11 +1316,18 @@ static ATOM WINAPI RegisterClassW_hook(const WNDCLASSW *lpWndClass) {
     }
 
     // copy struct and use own icon
-    WNDCLASSW wnd = *lpWndClass;
-    wnd.hIcon = WINDOW_ICON;
+    HICON icon = window_icon();
+    if (icon) {
+        WNDCLASSW wnd = *lpWndClass;
+        wnd.hIcon = icon;
+        ATOM atom = RegisterClassW_orig(&wnd);
+        if (atom != 0) {
+            return atom;
+        }
+        log_warning("graphics", "RegisterClassW with spice icon failed ({})", GetLastError());
+    }
 
-    // call original
-    return RegisterClassW_orig(&wnd);
+    return RegisterClassW_orig(lpWndClass);
 }
 
 static ATOM WINAPI RegisterClassExW_hook(const WNDCLASSEXW *Arg1) {
@@ -1306,12 +1338,19 @@ static ATOM WINAPI RegisterClassExW_hook(const WNDCLASSEXW *Arg1) {
     }
 
     // copy struct and use own icon
-    WNDCLASSEXW wnd = *Arg1;
-    wnd.hIcon = WINDOW_ICON;
-    wnd.hIconSm = WINDOW_ICON;
+    HICON icon = window_icon();
+    if (icon) {
+        WNDCLASSEXW wnd = *Arg1;
+        wnd.hIcon = icon;
+        wnd.hIconSm = icon;
+        ATOM atom = RegisterClassExW_orig(&wnd);
+        if (atom != 0) {
+            return atom;
+        }
+        log_warning("graphics", "RegisterClassExW with spice icon failed ({})", GetLastError());
+    }
 
-    // call original
-    return RegisterClassExW_orig(&wnd);
+    return RegisterClassExW_orig(Arg1);
 }
 
 static HHOOK WINAPI SetWindowsHookExA_hook(int, HOOKPROC, HINSTANCE, DWORD) {
