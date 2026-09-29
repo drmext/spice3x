@@ -1990,6 +1990,27 @@ int main_implementation(int argc, char *argv[]) {
         avs::core::load_dll();
         avs::ea3::load_dll();
 
+        // Same network/adapter path as the normal launcher. Game + AVS DLLs are
+        // already mapped, so one networkhook_init is enough.
+        if (nicspoof_cfg.mode != NicSpoofMode::Off) {
+            nicspoof_configure(nicspoof_cfg);
+            nicspoof_init();
+        }
+        if (icmphook_enable) {
+            icmphook_net_init();
+        }
+        if (!netfix_disable) {
+            networkhook_init();
+        }
+
+        // Local e-amusement server when -ea (not smartea — that starts in the hook).
+        if (easrv_port != 0u && !easrv_smart) {
+            easrv_start(easrv_port, easrv_maint, 4, 8);
+        }
+
+        // Game owns ea3_boot; rewrite services/PCBID when it calls in.
+        avs::ea3::hook_injected_boot(easrv_port, easrv_maint, easrv_smart);
+
         stubs::attach();
 
         // Intentionally leaked: IAT hooks and device handles must outlive this return.

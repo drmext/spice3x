@@ -734,6 +734,167 @@ namespace avs {
             log_info("avs-ea3", "boot done");
         }
 
+        namespace {
+
+            unsigned short injected_easrv_port = 0;
+            bool injected_easrv_maint = true;
+            bool injected_easrv_smart = false;
+            AVS_EA3_BOOT_STARTUP_T real_ea3_boot = nullptr;
+
+            std::string strip_url_scheme(std::string url) {
+                if (string_begins_with(url, "https://")) {
+                    return url.substr(8);
+                }
+                if (string_begins_with(url, "http://")) {
+                    return url.substr(7);
+                }
+                return url;
+            }
+
+            void replace_network_str(avs::core::node_ptr config, const char *path, const char *value) {
+                // prop may be null; AVS accepts a live node with null property
+                // (same pattern as bemanitools iidxhook3).
+                avs::core::property_search_remove_safe(nullptr, config, path);
+                avs::core::property_node_create(
+                        nullptr,
+                        config,
+                        avs::core::NODE_TYPE_str,
+                        path,
+                        value);
+            }
+
+            void replace_network_bool(avs::core::node_ptr config, const char *path, int value) {
+                avs::core::property_search_remove_safe(nullptr, config, path);
+                avs::core::property_node_create(
+                        nullptr,
+                        config,
+                        avs::core::NODE_TYPE_bool,
+                        path,
+                        value);
+            }
+
+            void apply_injected_network_config(avs::core::node_ptr config) {
+                if (config == nullptr) {
+                    return;
+                }
+
+                // http11 / url_slash (relative to /ea3)
+                if (HTTP11 >= 0) {
+                    replace_network_bool(config, "network/http11", HTTP11);
+                }
+                if (URL_SLASH >= 0) {
+                    replace_network_bool(config, "network/url_slash", URL_SLASH);
+                }
+
+                // services URL
+                std::string services;
+                if (!URL_CUSTOM.empty()) {
+                    services = URL_CUSTOM;
+                } else if (injected_easrv_port != 0u) {
+                    services = "http://localhost:" + std::to_string(injected_easrv_port) + "/";
+                }
+
+                if (!services.empty()) {
+                    // Sirius ea3_boot rejects a scheme on network/services.
+                    const auto stripped = strip_url_scheme(services);
+                    log_info("avs-ea3", "injected services URL: {} (stored as {})",
+                            services, stripped);
+                    replace_network_str(config, "network/services", stripped.c_str());
+                    EA3_BOOT_URL = services;
+                } else {
+                    char url_buffer[512] {};
+                    avs::core::property_node_refer(
+                            nullptr,
+                            config,
+                            "network/services",
+                            avs::core::NODE_TYPE_str,
+                            url_buffer,
+                            sizeof(url_buffer));
+                    EA3_BOOT_URL = std::string(url_buffer);
+                }
+
+                // PCBID: -p, or default when the game XML left it empty
+                char pcbid[21] {};
+                avs::core::property_node_refer(
+                        nullptr,
+                        config,
+                        "id/pcbid",
+                        avs::core::NODE_TYPE_str,
+                        pcbid,
+                        sizeof(pcbid));
+                if (!pcbid[0] && PCBID_CUSTOM.empty()) {
+                    log_warning("avs-ea3",
+                            "no PCBID set, falling back to default PCBID value "
+                            "(01201000000000010101)");
+                    PCBID_CUSTOM = "01201000000000010101";
+                }
+                if (!PCBID_CUSTOM.empty()) {
+                    strncpy(pcbid, PCBID_CUSTOM.c_str(), sizeof(pcbid) - 1);
+                    pcbid[sizeof(pcbid) - 1] = '\0';
+                    replace_network_str(config, "id/pcbid", pcbid);
+                    EA3_BOOT_PCBID = pcbid;
+                    log_info("avs-ea3", "injected PCBID: {}", EA3_BOOT_PCBID);
+                } else {
+                    EA3_BOOT_PCBID = pcbid;
+                }
+
+                // smartea: if configured services are dead, fall back to local easrv
+                if (injected_easrv_smart && !smartea::check_url(EA3_BOOT_URL)) {
+                    log_info("avs-ea3", "starting smartea local server on port 8080");
+                    easrv_start(8080, injected_easrv_maint, 4, 8);
+                    EA3_BOOT_URL = "http://localhost:8080";
+                    replace_network_str(
+                            config,
+                            "network/services",
+                            strip_url_scheme(EA3_BOOT_URL).c_str());
+                    URL_SLASH = 1;
+                    replace_network_bool(config, "network/url_slash", URL_SLASH);
+                }
+            }
+
+            int hooked_ea3_boot(void *config) {
+                log_info("avs-ea3", "injected ea3_boot hook");
+                apply_injected_network_config(static_cast<avs::core::node_ptr>(config));
+                logger::PCBIDFilter filter;
+                if (real_ea3_boot == nullptr) {
+                    log_fatal("avs-ea3", "injected ea3_boot original missing");
+                }
+                return real_ea3_boot(config);
+            }
+
+        } // namespace
+
+        void hook_injected_boot(unsigned short easrv_port, bool easrv_maint, bool easrv_smart) {
+            injected_easrv_port = easrv_port;
+            injected_easrv_maint = easrv_maint;
+            injected_easrv_smart = easrv_smart;
+
+            // Patch every loaded module's IAT for "ea3_boot" (bm2dx.exe and any
+            // libavs-win32*.dll that re-exports/calls it), matching iidxhook3.
+            auto *orig = detour::iat_try("ea3_boot", hooked_ea3_boot);
+            if (orig != nullptr) {
+                real_ea3_boot = reinterpret_cast<AVS_EA3_BOOT_STARTUP_T>(orig);
+                log_info("avs-ea3", "hooked ea3_boot (IAT) for injected network config");
+                return;
+            }
+
+            // Export resolved but not imported by name — MinHook the real entry.
+            if (avs_ea3_boot_startup != nullptr) {
+                void *tramp_orig = nullptr;
+                if (detour::trampoline_try(
+                        reinterpret_cast<void *>(avs_ea3_boot_startup),
+                        reinterpret_cast<void *>(hooked_ea3_boot),
+                        &tramp_orig)
+                        && tramp_orig != nullptr) {
+                    real_ea3_boot = reinterpret_cast<AVS_EA3_BOOT_STARTUP_T>(tramp_orig);
+                    log_info("avs-ea3", "hooked ea3_boot (trampoline) for injected network config");
+                    return;
+                }
+            }
+
+            log_warning("avs-ea3", "ea3_boot not found; network URL will not be applied");
+        }
+
         void shutdown() {
 
             // SSL shutdown

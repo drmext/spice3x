@@ -40,6 +40,9 @@ namespace avs {
         // functions
         void load_dll();
         void boot(unsigned short easrv_port, bool easrv_maint, bool easrv_smart);
+        // Injected EXE games call ea3_boot themselves; install an IAT hook that
+        // applies spice's services URL / PCBID before the real boot runs.
+        void hook_injected_boot(unsigned short easrv_port, bool easrv_maint, bool easrv_smart);
         void shutdown();
     }
 
