@@ -51,6 +51,7 @@ bool g_log_params = true;
 [[maybe_unused]] decltype(GetNetworkParams) *GetNetworkParams_orig = nullptr;
 [[maybe_unused]] decltype(getaddrinfo) *getaddrinfo_orig = nullptr;
 [[maybe_unused]] decltype(freeaddrinfo) *freeaddrinfo_orig = nullptr;
+[[maybe_unused]] decltype(gethostbyname) *gethostbyname_orig = nullptr;
 
 void ip_to_str(uint32_t ip, char *out, size_t n) {
     if (!out || n == 0) {
@@ -108,6 +109,22 @@ bool name_is_numeric_ipv4(const char *name) {
         return false;
     }
     return a <= 255 && b <= 255 && c <= 255 && d <= 255;
+}
+
+/* Same name→IP rules as getaddrinfo_hook (host order). */
+uint32_t spoof_resolve_ipv4(const char *name) {
+    if (!name || !name[0] || name_is_local(name)) {
+        if (name && (_stricmp(name, k_hostname) == 0 ||
+                _stricmp(name, k_hostname_fqdn) == 0)) {
+            return g_local_ip;
+        }
+        return 0x7F000001u;
+    }
+    if (name_is_numeric_ipv4(name)) {
+        return parse_ipv4(name);
+    }
+    /* offline=1: map external names to local_ip */
+    return g_local_ip;
 }
 
 DWORD WINAPI GetAdaptersInfo_hook(PIP_ADAPTER_INFO p, PULONG s) {
@@ -434,19 +451,7 @@ INT WSAAPI getaddrinfo_hook(
         return EAI_FAMILY;
     }
 
-    if (!pNodeName || !pNodeName[0] || name_is_local(pNodeName)) {
-        if (pNodeName && (_stricmp(pNodeName, k_hostname) == 0 ||
-                _stricmp(pNodeName, k_hostname_fqdn) == 0)) {
-            ip = g_local_ip;
-        } else {
-            ip = 0x7F000001u;
-        }
-    } else if (name_is_numeric_ipv4(pNodeName)) {
-        ip = parse_ipv4(pNodeName);
-    } else {
-        /* offline=1: map external names to local_ip */
-        ip = g_local_ip;
-    }
+    ip = spoof_resolve_ipv4(pNodeName);
 
     if (pServiceName && pServiceName[0]) {
         port = atoi(pServiceName);
@@ -492,6 +497,34 @@ INT WSAAPI getaddrinfo_hook(
     ai->ai_next = nullptr;
     *ppResult = ai;
     return 0;
+}
+
+/*
+ * JDJ libavs resolves the NTP service URL via gethostbyname (not getaddrinfo).
+ * Mirror getaddrinfo spoofing so NTP SERVER on the network screen shows the
+ * overlay IP instead of a real DNS result. Static hostent matches Winsock API.
+ */
+hostent *WSAAPI gethostbyname_hook(const char *name) {
+    static hostent he;
+    static char *aliases[1] = {nullptr};
+    static in_addr addr;
+    static char *addr_list[2] = {
+            reinterpret_cast<char *>(&addr),
+            nullptr};
+    static char name_buf[256];
+    const char *name_src = (name && name[0]) ? name : "localhost";
+    uint32_t ip = spoof_resolve_ipv4(name);
+
+    strncpy(name_buf, name_src, sizeof(name_buf) - 1);
+    name_buf[sizeof(name_buf) - 1] = 0;
+
+    addr.s_addr = htonl(ip);
+    he.h_name = name_buf;
+    he.h_aliases = aliases;
+    he.h_addrtype = AF_INET;
+    he.h_length = 4;
+    he.h_addr_list = addr_list;
+    return &he;
 }
 
 void install_nicspoof_hooks() {
@@ -540,6 +573,10 @@ void install_nicspoof_hooks() {
             "ws2_32.dll", "freeaddrinfo",
             (void *) freeaddrinfo_hook,
             (void **) &freeaddrinfo_orig);
+    ok &= detour::trampoline_try(
+            "ws2_32.dll", "gethostbyname",
+            (void *) gethostbyname_hook,
+            (void **) &gethostbyname_orig);
 
     {
         HMODULE ws = GetModuleHandleA("ws2_32.dll");
@@ -567,7 +604,7 @@ void install_nicspoof_hooks() {
     } else {
         log_info("network",
                 "NIC spoof hooks installed "
-                "(GAA/GAI/GNP/getaddrinfo/freeaddrinfo)");
+                "(GAA/GAI/GNP/getaddrinfo/freeaddrinfo/gethostbyname)");
     }
 }
 
