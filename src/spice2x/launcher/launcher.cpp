@@ -312,7 +312,9 @@ int main_implementation(int argc, char *argv[]) {
     }
 
 #if !defined(SPICE64)
-    if (avs::game::MODEL[0] == '\0') {
+    // MODEL defaults to "000"; MODEL[0]=='\0' never fires. Detect JDJ before
+    // get_options so spicecfg options for Beatmania IIDX are merged.
+    if (avs::game::is_model("000")) {
         if (auto jdj = launcher::try_detect_jdj()) {
             if (jdj->dest.size() == 1) {
                 avs::game::DEST[0] = jdj->dest[0];
