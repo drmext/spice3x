@@ -825,7 +825,8 @@ endif()
 ##############################################################################
 
 add_library(spicetools_spice_hook SHARED
-        launcher/hookdll.cpp)
+        launcher/hookdll.cpp
+        build/icon.rc)
 if(MSVC)
     target_sources(spicetools_spice_hook PRIVATE launcher/hookdll.def)
 endif()

@@ -58,8 +58,33 @@ static HWND NDD_SUBSCREEN_WINDOW = nullptr;
 HWND NDD_MAIN_WINDOW = nullptr;
 bool FAKE_SUBSCREEN_ADAPTER = false;
 
-// icon
-static HICON WINDOW_ICON = LoadIcon(GetModuleHandle(nullptr), MAKEINTRESOURCE(MAINICON));
+// icon — load from this module (spice.exe for DLL games, spicehook.dll when injected)
+static HMODULE get_spice_module() {
+    HMODULE module = nullptr;
+    GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&get_spice_module),
+            &module);
+    return module;
+}
+
+static HICON load_window_icon() {
+    HMODULE module = get_spice_module();
+    if (!module) {
+        module = GetModuleHandle(nullptr);
+    }
+    return LoadIcon(module, MAKEINTRESOURCE(MAINICON));
+}
+
+static HICON WINDOW_ICON = load_window_icon();
+
+static void apply_window_icon(HWND hwnd) {
+    if (hwnd == nullptr || WINDOW_ICON == nullptr) {
+        return;
+    }
+    SendMessage(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(WINDOW_ICON));
+    SendMessage(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(WINDOW_ICON));
+}
 
 // state
 static WNDPROC WNDPROC_ORIG = nullptr;
@@ -748,6 +773,7 @@ static HWND WINAPI CreateWindowExA_hook(DWORD dwExStyle, LPCSTR lpClassName, LPC
 
     // theme the native title bar (dark/light)
     set_window_dark_titlebar(result);
+    apply_window_icon(result);
 
     if (is_tdj_sub_window) {
         // TDJ windowed mode: remember the subscreen window handle for later
@@ -903,6 +929,7 @@ static HWND WINAPI CreateWindowExW_hook(DWORD dwExStyle, LPCWSTR lpClassName, LP
 
     // theme the native title bar (dark/light)
     set_window_dark_titlebar(result);
+    apply_window_icon(result);
 
     log_misc(
         "graphics",

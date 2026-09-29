@@ -3,7 +3,6 @@
 #include <vector>
 
 #include "avs/game.h"
-#include "games/gitadora/gitadora.h"
 #include "util/detour.h"
 #include "util/logging.h"
 #include "util/utils.h"
@@ -403,9 +402,11 @@ static BOOL WINAPI ClearCommError_hook(HANDLE hFile, LPDWORD lpErrors, LPCOMSTAT
             lpStat->cbInQue = custom_handle->bytes_available();
         }
 
-        // gitadora arena model needs this, or else
-        // the game will keep spamming 0xAA
-        if (games::gitadora::is_arena_model() && lpErrors) {
+        // libacio (IIDX 13-18) calls this with a live lpErrors and a null
+        // status. Leaving the port index in that dword makes every poll look
+        // like a serial error, so autobaud never finishes and the IC card
+        // line ends at ICCARD INIT ERR.
+        if (lpErrors) {
             *lpErrors = 0;
         }
 
