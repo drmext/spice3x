@@ -1973,6 +1973,17 @@ int main_implementation(int argc, char *argv[]) {
         // Match bm2dx.dll IIDX path: show cursor in windowed mode
         if (GRAPHICS_WINDOWED) {
             GRAPHICS_SHOW_CURSOR = true;
+
+            // Arcade SD widescreen: keep the 640x480 backbuffer and let Present
+            // stretch into an 854x480 client (OBS-style). Do not use -windowscale.
+            // Outer HWND is larger via deco so the border is not part of 854x480.
+            if (!GRAPHICS_WINDOW_SIZE.has_value()) {
+                GRAPHICS_WINDOW_SIZE = {854, 480};
+                log_info(
+                    "launcher",
+                    "JDJ arcade widescreen: client 854x480, backbuffer stays 640x480 "
+                    "(Present stretch; override with -windowsize)");
+            }
         }
 
         // Bind already-loaded libavs-win32*.dll imports (static imports of the exe)
