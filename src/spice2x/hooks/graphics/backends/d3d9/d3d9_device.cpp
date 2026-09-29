@@ -17,6 +17,7 @@
 #include "cfg/screen_resize.h"
 
 #include "d3d9_backend.h"
+#include "d3d9_bb_scale.h"
 #include "d3d9_live2d.h"
 #include "d3d9_readback.h"
 #include "d3d9_texture.h"
@@ -162,6 +163,7 @@ ULONG STDMETHODCALLTYPE WrappedIDirect3DDevice9::Release() {
         // holds a reference on the device, so it has to go before the counts are compared
         this->gfdm_small_head.release();
 
+        d3d9_bb_scale::on_device_release();
         d3d9_readback::release_device_resources(this->pReal);
 
         if (overlay::ENABLED) {
@@ -632,6 +634,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::Reset(
         } else if (GRAPHICS_FORCE_REFRESH > 0) {
             pPresentationParameters->FullScreen_RefreshRateInHz = GRAPHICS_FORCE_REFRESH;
         }
+        d3d9_bb_scale::apply_presentation_params(pPresentationParameters);
     }
 
     sdk::d3d9::invalidate(pReal);
@@ -644,10 +647,16 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::Reset(
     gfdm_small_head.release();
 
     // Reset refuses to run while any default pool resource is outstanding
+    d3d9_bb_scale::on_device_reset_invalidate();
     d3d9_readback::discard_snapshot_targets(pReal);
 
     HRESULT res = pReal->Reset(pPresentationParameters);
     sdk::d3d9::reset_complete(pReal, SUCCEEDED(res));
+
+    if (SUCCEEDED(res)) {
+        d3d9_bb_scale::on_device_reset_recreate(pReal, pPresentationParameters);
+        d3d9_bb_scale::restore_presentation_params(pPresentationParameters);
+    }
 
     // recreate overlay
     if (overlay::OVERLAY && overlay::OVERLAY->uses_device(pReal) && SUCCEEDED(res)) {
@@ -690,6 +699,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::GetBackBuffer(
         IDirect3DSurface9 **ppBackBuffer)
 {
     WRAP_VERBOSE;
+    if (d3d9_bb_scale::try_get_back_buffer(iSwapChain, iBackBuffer, Type, ppBackBuffer)) {
+        return D3D_OK;
+    }
     if (is_gfdm_two_head_exclusive()
             && is_gfdm_logical_side_swapchain(iSwapChain))
     {
@@ -1075,6 +1087,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::BeginScene() {
         log_misc("graphics::d3d9", "WrappedIDirect3DDevice9::BeginScene");
     });
 
+    d3d9_bb_scale::on_begin_scene(pReal);
     return pReal->BeginScene();
 }
 
@@ -2264,6 +2277,10 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::ResetEx(
         }
     }
 
+    if (pPresentationParameters) {
+        d3d9_bb_scale::apply_presentation_params(pPresentationParameters);
+    }
+
     GfdmTwoHeadDeviceState gfdm_parameters(
             pPresentationParameters,
             pFullscreenDisplayMode,
@@ -2355,6 +2372,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::ResetEx(
     gfdm_small_head.release();
 
     // ResetEx refuses to run while any default pool resource is outstanding
+    d3d9_bb_scale::on_device_reset_invalidate();
     d3d9_readback::discard_snapshot_targets(pReal);
 
     HRESULT res = static_cast<IDirect3DDevice9Ex *>(pReal)->ResetEx(
@@ -2362,6 +2380,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::ResetEx(
             gfdm_parameters.fullscreen_display_modes);
 
     sdk::d3d9::reset_complete(pReal, SUCCEEDED(res));
+
+    if (SUCCEEDED(res)) {
+        d3d9_bb_scale::on_device_reset_recreate(pReal, pPresentationParameters);
+        d3d9_bb_scale::restore_presentation_params(pPresentationParameters);
+    }
 
     if (is_gfdm_two_head_exclusive()
             && SUCCEEDED(res)

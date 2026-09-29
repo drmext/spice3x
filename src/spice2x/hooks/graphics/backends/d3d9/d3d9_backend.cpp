@@ -31,6 +31,7 @@
 #include "util/utils.h"
 #include "util/memutils.h"
 
+#include "d3d9_bb_scale.h"
 #include "d3d9_device.h"
 #include "d3d9_screenshot.h"
 
@@ -887,6 +888,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3D9::CreateDevice(
         pPresentationParameters->Windowed = true;
         pPresentationParameters->FullScreen_RefreshRateInHz = 0;
         update_backbuffer_dimensions(pPresentationParameters);
+        d3d9_bb_scale::apply_presentation_params(pPresentationParameters);
 
     } else if (GRAPHICS_FORCE_REFRESH > 0) {
         log_info("graphics::d3d9", "force refresh rate: {} => {} Hz (-graphics-force-refresh option)",
@@ -943,6 +945,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3D9::CreateDevice(
         log_info("graphics::d3d9", "IDirect3D9::CreateDevice failed, hr={}", FMT_HRESULT(ret));
         log_create_device_failure(ret);
     } else if (!D3D9_DEVICE_HOOK_DISABLE) {
+        d3d9_bb_scale::on_device_created(*ppReturnedDeviceInterface, pPresentationParameters);
+        d3d9_bb_scale::restore_presentation_params(pPresentationParameters);
+
         graphics_hook_window(hFocusWindow, pPresentationParameters);
 
         auto *wrapped = new WrappedIDirect3DDevice9(
@@ -1168,6 +1173,7 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3D9::CreateDeviceEx(
         pPresentationParameters->Windowed = true;
         pPresentationParameters->FullScreen_RefreshRateInHz = 0;
         update_backbuffer_dimensions(pPresentationParameters);
+        d3d9_bb_scale::apply_presentation_params(pPresentationParameters);
         pFullscreenDisplayMode = nullptr;
     } else if (GRAPHICS_FORCE_REFRESH > 0) {
         log_info("graphics::d3d9", "force refresh rate: {} => {} Hz",
@@ -1299,6 +1305,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3D9::CreateDeviceEx(
         log_create_device_failure(result);
 
     } else if (!D3D9_DEVICE_HOOK_DISABLE) {
+        d3d9_bb_scale::on_device_created(*ppReturnedDeviceInterface, pPresentationParameters);
+        d3d9_bb_scale::restore_presentation_params(pPresentationParameters);
+
         graphics_hook_window(hFocusWindow, pPresentationParameters);
 
         auto *wrapped = new WrappedIDirect3DDevice9(
@@ -1482,6 +1491,11 @@ void graphics_d3d9_on_present(
     // single point guaranteed to be after the game's last `EndScene` and before the real `Present`,
     // so the back buffer is fully drawn and the expensive StretchRect work happens exactly once per
     // frame. it must run before the overlay is rendered so the overlay isn't scaled with the image.
+    //
+    // JDJ bb_scale: blit the 640 game RT into the 854 backbuffer with linear filtering first so
+    // Present is 1:1 (avoids crunchy driver Present stretch).
+    d3d9_bb_scale::on_present(device);
+
     if (cfg::SCREENRESIZE->enable_screen_resize || GRAPHICS_FS_ORIENTATION_SWAP) {
         SurfaceHook(device);
     }

@@ -1974,15 +1974,15 @@ int main_implementation(int argc, char *argv[]) {
         if (GRAPHICS_WINDOWED) {
             GRAPHICS_SHOW_CURSOR = true;
 
-            // Arcade SD widescreen: keep the 640x480 backbuffer and let Present
-            // stretch into an 854x480 client (OBS-style). Do not use -windowscale.
+            // Arcade SD widescreen: 640x480 game RT → linear StretchRect into
+            // 854x480 backbuffer (Present 1:1). Do not use -windowscale.
             // Outer HWND is larger via deco so the border is not part of 854x480.
             if (!GRAPHICS_WINDOW_SIZE.has_value()) {
                 GRAPHICS_WINDOW_SIZE = {854, 480};
                 log_info(
                     "launcher",
-                    "JDJ arcade widescreen: client 854x480, backbuffer stays 640x480 "
-                    "(Present stretch; override with -windowsize)");
+                    "JDJ arcade widescreen: client 854x480 with filtered 640→854 "
+                    "backbuffer scale (override with -windowsize)");
             }
         }
 

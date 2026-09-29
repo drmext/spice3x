@@ -1491,8 +1491,8 @@ void graphics_hook_window(HWND hWnd, D3DPRESENT_PARAMETERS *pPresentationParamet
 
     // update window size for a few games
     // TODO: make this work on everything
-    // JDJ must stay off this list: arcade widescreen keeps BB at 640x480 and
-    // stretches Present into an 854x480 client via GRAPHICS_WINDOW_SIZE.
+    // JDJ must stay off this list: arcade widescreen keeps game drawing at
+    // 640x480 (via bb_scale RT) while the client/backbuffer is 854x480.
     if (pPresentationParameters != nullptr && GRAPHICS_WINDOWED
     && (avs::game::is_model({ "K39", "L39", "M39", "JMP", "LDJ" }))) {
 
