@@ -337,6 +337,10 @@ namespace games::iidx {
             setupapihook_init(avs::game::DLL_INSTANCE);
             setupapihook_add(settings1);
 
+            if (is_jdj) {
+                // Settings, backup and avs_conf live on d:\, e:\ and f:\.
+                hooks::device::REMAP_SETTINGS_DRIVES = true;
+            }
             devicehook_init();
             if (is_jdj) {
                 // Sirius: ezusb.sys ioctls, ezusb-iidx v2 packets, round-plug v2

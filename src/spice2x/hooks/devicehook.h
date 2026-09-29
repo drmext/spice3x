@@ -5,6 +5,9 @@
 
 namespace hooks::device {
     extern bool ENABLE;
+    // Remap d:\, e:\ and f:\ onto .\d, .\e and .\f. Sirius keeps settings,
+    // backup and avs_conf on those drives.
+    extern bool REMAP_SETTINGS_DRIVES;
 }
 
 extern bool DEVICE_CREATEFILE_DEBUG;

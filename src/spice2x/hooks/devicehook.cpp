@@ -16,6 +16,7 @@
 
 namespace hooks::device {
     bool ENABLE = true;
+    bool REMAP_SETTINGS_DRIVES = false;
 }
 
 bool DEVICE_CREATEFILE_DEBUG = false;
@@ -26,6 +27,8 @@ static decltype(ClearCommError) *ClearCommError_orig = nullptr;
 static decltype(CloseHandle) *CloseHandle_orig = nullptr;
 static decltype(CreateFileA) *CreateFileA_orig = nullptr;
 static decltype(CreateFileW) *CreateFileW_orig = nullptr;
+static decltype(CreateDirectoryA) *CreateDirectoryA_orig = nullptr;
+static decltype(CreateDirectoryW) *CreateDirectoryW_orig = nullptr;
 static decltype(DeviceIoControl) *DeviceIoControl_orig = nullptr;
 static decltype(EscapeCommFunction) *EscapeCommFunction_orig = nullptr;
 static decltype(FlushFileBuffers) *FlushFileBuffers_orig = nullptr;
@@ -151,10 +154,72 @@ static inline CustomHandle *get_custom_handle(HANDLE handle) {
     return nullptr;
 }
 
+static bool is_settings_drive(unsigned letter, unsigned colon) {
+    if (letter >= 'A' && letter <= 'Z') {
+        letter += 'a' - 'A';
+    }
+    return (letter == 'd' || letter == 'e' || letter == 'f') && colon == ':';
+}
+
+// e:\avs_conf\foo -> .\e\avs_conf\foo, same idea as bemanitools settings_hook.
+template <typename CharT>
+static void rewrite_settings_path(std::basic_string<CharT> &path) {
+    for (CharT &ch : path) {
+        if (ch == static_cast<CharT>('/') || ch == static_cast<CharT>(':')) {
+            ch = static_cast<CharT>('\\');
+        }
+    }
+}
+
+static void ensure_settings_roots() {
+    static bool ready = false;
+    if (ready || CreateDirectoryA_orig == nullptr) {
+        return;
+    }
+    ready = true;
+    CreateDirectoryA_orig(".\\d", nullptr);
+    CreateDirectoryA_orig(".\\e", nullptr);
+    CreateDirectoryA_orig(".\\f", nullptr);
+    log_info("devicehook", "settings drives d:, e: and f: redirected under .\\");
+}
+
+static const char *remap_settings_path_a(const char *path) {
+    static thread_local std::string storage;
+    if (!hooks::device::REMAP_SETTINGS_DRIVES || path == nullptr || path[0] == '\0' || path[1] == '\0') {
+        return path;
+    }
+    if (!is_settings_drive(static_cast<unsigned char>(path[0]), static_cast<unsigned char>(path[1]))) {
+        return path;
+    }
+
+    ensure_settings_roots();
+    storage = ".\\";
+    storage += path;
+    rewrite_settings_path(storage);
+    return storage.c_str();
+}
+
+static const wchar_t *remap_settings_path_w(const wchar_t *path) {
+    static thread_local std::wstring storage;
+    if (!hooks::device::REMAP_SETTINGS_DRIVES || path == nullptr || path[0] == L'\0' || path[1] == L'\0') {
+        return path;
+    }
+    if (!is_settings_drive(path[0], path[1])) {
+        return path;
+    }
+
+    ensure_settings_roots();
+    storage = L".\\";
+    storage += path;
+    rewrite_settings_path(storage);
+    return storage.c_str();
+}
+
 static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
                                       LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
                                       DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
     HANDLE result = INVALID_HANDLE_VALUE;
+    lpFileName = remap_settings_path_a(lpFileName);
 
     // convert to wide char
     WCHAR lpFileNameW[512] { 0 };
@@ -227,6 +292,7 @@ static HANDLE WINAPI CreateFileW_hook(LPCWSTR lpFileName, DWORD dwDesiredAccess,
                                       DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 {
     HANDLE result = INVALID_HANDLE_VALUE;
+    lpFileName = remap_settings_path_w(lpFileName);
 
     // debug
     if (DEVICE_CREATEFILE_DEBUG && lpFileName != nullptr) {
@@ -426,6 +492,16 @@ static BOOL WINAPI EscapeCommFunction_hook(HANDLE hFile, DWORD dwFunc) {
     return EscapeCommFunction_orig(hFile, dwFunc);
 }
 
+static BOOL WINAPI CreateDirectoryA_hook(LPCSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    lpPathName = remap_settings_path_a(lpPathName);
+    return CreateDirectoryA_orig(lpPathName, lpSecurityAttributes);
+}
+
+static BOOL WINAPI CreateDirectoryW_hook(LPCWSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
+    lpPathName = remap_settings_path_w(lpPathName);
+    return CreateDirectoryW_orig(lpPathName, lpSecurityAttributes);
+}
+
 static BOOL WINAPI FlushFileBuffers_hook(HANDLE hFile) {
     auto *custom_handle = get_custom_handle(hFile);
     if (custom_handle && !custom_handle->com_pass) {
@@ -604,6 +680,8 @@ void devicehook_init(HMODULE module) {
     STORE(CloseHandle_orig, detour::iat_try("CloseHandle", CloseHandle_hook, module));
     STORE(CreateFileA_orig, detour::iat_try("CreateFileA", CreateFileA_hook, module));
     STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
+    STORE(CreateDirectoryA_orig, detour::iat_try("CreateDirectoryA", CreateDirectoryA_hook, module));
+    STORE(CreateDirectoryW_orig, detour::iat_try("CreateDirectoryW", CreateDirectoryW_hook, module));
     STORE(DeviceIoControl_orig, detour::iat_try("DeviceIoControl", DeviceIoControl_hook, module));
     STORE(EscapeCommFunction_orig, detour::iat_try("EscapeCommFunction", EscapeCommFunction_hook, module));
     STORE(FlushFileBuffers_orig, detour::iat_try("FlushFileBuffers", FlushFileBuffers_hook, module));
@@ -647,6 +725,8 @@ void devicehook_init_module(HMODULE module) {
     STORE(CloseHandle_orig, detour::iat_try("CloseHandle", CloseHandle_hook, module));
     STORE(CreateFileA_orig, detour::iat_try("CreateFileA", CreateFileA_hook, module));
     STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
+    STORE(CreateDirectoryA_orig, detour::iat_try("CreateDirectoryA", CreateDirectoryA_hook, module));
+    STORE(CreateDirectoryW_orig, detour::iat_try("CreateDirectoryW", CreateDirectoryW_hook, module));
     STORE(DeviceIoControl_orig, detour::iat_try("DeviceIoControl", DeviceIoControl_hook, module));
     STORE(EscapeCommFunction_orig, detour::iat_try("EscapeCommFunction", EscapeCommFunction_hook, module));
     STORE(FlushFileBuffers_orig, detour::iat_try("FlushFileBuffers", FlushFileBuffers_hook, module));
@@ -684,6 +764,8 @@ void devicehook_init_trampoline() {
     detour::trampoline_try("kernel32.dll", "ClearCommError", ClearCommError_hook, &ClearCommError_orig);
     detour::trampoline_try("kernel32.dll", "CloseHandle", CloseHandle_hook, &CloseHandle_orig);
     detour::trampoline_try("kernel32.dll", "CreateFileA", CreateFileA_hook, &CreateFileA_orig);
+    detour::trampoline_try("kernel32.dll", "CreateDirectoryA", CreateDirectoryA_hook, &CreateDirectoryA_orig);
+    detour::trampoline_try("kernel32.dll", "CreateDirectoryW", CreateDirectoryW_hook, &CreateDirectoryW_orig);
     detour::trampoline_try("kernel32.dll", "CreateFileW", CreateFileW_hook, &CreateFileW_orig);
     detour::trampoline_try("kernel32.dll", "DeviceIoControl", DeviceIoControl_hook, &DeviceIoControl_orig);
     detour::trampoline_try("kernel32.dll", "EscapeCommFunction", EscapeCommFunction_hook, &EscapeCommFunction_orig);
