@@ -24,4 +24,8 @@ namespace launcher {
     // CREATE_SUSPENDED + LoadLibraryW of the embedded hook + spice_exe_init,
     // then wait for the game process. Returns the game exit code.
     int exe_inject(const ExeGameTarget &target);
+
+    // Terminate the injected game process early (CTRL+C / console close).
+    // No-op when not injecting.
+    void terminate_injected_child();
 }

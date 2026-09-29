@@ -17,6 +17,8 @@ namespace launcher {
     int exe_inject(const ExeGameTarget &) {
         return 1;
     }
+
+    void terminate_injected_child() {}
 }
 
 #else
@@ -29,6 +31,51 @@ namespace launcher {
 #include "util/utils.h"
 
 namespace launcher {
+
+    // Kept open for terminate_injected_child / job kill-on-close while waiting.
+    static HANDLE g_injected_child = nullptr;
+    static HANDLE g_injected_job = nullptr;
+
+    void terminate_injected_child() {
+        if (g_injected_child != nullptr && g_injected_child != INVALID_HANDLE_VALUE) {
+            TerminateProcess(g_injected_child, 1);
+        }
+    }
+
+    static void clear_injected_handles() {
+        // Drop the child pointer before the process handle is closed so a
+        // concurrent CTRL+C cannot TerminateProcess a closed handle.
+        g_injected_child = nullptr;
+        if (g_injected_job != nullptr) {
+            CloseHandle(g_injected_job);
+            g_injected_job = nullptr;
+        }
+    }
+
+    static bool assign_kill_on_close_job(HANDLE process) {
+        HANDLE job = CreateJobObjectW(nullptr, nullptr);
+        if (!job) {
+            log_warning("exe-inject", "CreateJobObject failed: {}", GetLastError());
+            return false;
+        }
+
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info {};
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+            log_warning("exe-inject", "SetInformationJobObject failed: {}", GetLastError());
+            CloseHandle(job);
+            return false;
+        }
+
+        if (!AssignProcessToJobObject(job, process)) {
+            log_warning("exe-inject", "AssignProcessToJobObject failed: {}", GetLastError());
+            CloseHandle(job);
+            return false;
+        }
+
+        g_injected_job = job;
+        return true;
+    }
 
     static std::optional<ExeGameTarget> parse_sidcode_file(
             const std::filesystem::path &sidcode_path) {
@@ -359,12 +406,19 @@ namespace launcher {
             log_fatal("exe-inject", "CreateProcessW failed: {}", GetLastError());
         }
 
+        g_injected_child = pi.hProcess;
+        if (!assign_kill_on_close_job(pi.hProcess)) {
+            log_warning("exe-inject",
+                    "job kill-on-close unavailable; CTRL+C will use TerminateProcess fallback");
+        }
+
         log_info("exe-inject", "created suspended process pid={}", pi.dwProcessId);
 
         HMODULE remote_module = nullptr;
         if (!remote_load_library(pi.hProcess, temp_dll, &remote_module)) {
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
+            clear_injected_handles();
             CloseHandle(pi.hProcess);
             DeleteFileW(temp_dll.c_str());
             log_fatal("exe-inject", "failed to LoadLibraryW hook into game");
@@ -375,6 +429,7 @@ namespace launcher {
         if (!remote_call_export(pi.hProcess, remote_module, init_rva)) {
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
+            clear_injected_handles();
             CloseHandle(pi.hProcess);
             // temp DLL stays locked by the game until Terminate finishes
             log_fatal("exe-inject", "failed to run spice_exe_init in game");
@@ -384,6 +439,7 @@ namespace launcher {
         if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hThread);
+            clear_injected_handles();
             CloseHandle(pi.hProcess);
             log_fatal("exe-inject", "ResumeThread failed: {}", GetLastError());
         }
@@ -392,6 +448,7 @@ namespace launcher {
         DWORD exit_code = 1;
         GetExitCodeProcess(pi.hProcess, &exit_code);
         CloseHandle(pi.hThread);
+        clear_injected_handles();
         CloseHandle(pi.hProcess);
 
         // Game has unlocked the temp file.

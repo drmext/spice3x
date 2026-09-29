@@ -53,6 +53,28 @@ extern "C" SPICE_THREAD_ENTRY DWORD WINAPI spice_exe_init(LPVOID) {
     // dropped the variable for any reason.
     SetEnvironmentVariableA("SPICE_INJECTED", "1");
 
+    // bm2dx.exe is a GUI image and CreateProcess did not inherit std handles,
+    // so logger WriteFile(STD_OUTPUT_HANDLE) would go nowhere. Attach to the
+    // spice.exe console before logger::start() so inject + game logs share it.
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+        const DWORD err = GetLastError();
+        if (err != ERROR_ACCESS_DENIED) {
+            // ERROR_ACCESS_DENIED: already attached; anything else: no console
+        }
+    }
+    HANDLE conout = CreateFileA(
+            "CONOUT$",
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr,
+            OPEN_EXISTING,
+            0,
+            nullptr);
+    if (conout != INVALID_HANDLE_VALUE) {
+        SetStdHandle(STD_OUTPUT_HANDLE, conout);
+        SetStdHandle(STD_ERROR_HANDLE, conout);
+    }
+
     const int rc = main_implementation(static_cast<int>(argv.size()), argv.data());
     return static_cast<DWORD>(rc < 0 ? 1 : rc);
 }

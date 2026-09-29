@@ -10,6 +10,7 @@
 #include "acio/acio.h"
 #include "external/stackwalker/stackwalker.h"
 #include "hooks/libraryhook.h"
+#include "launcher/exe_inject.h"
 #include "launcher/shutdown.h"
 #include "util/deferlog.h"
 #include "util/detour.h"
@@ -464,9 +465,9 @@ static void log_exception_chain(const struct _EXCEPTION_RECORD *record) {
 static BOOL WINAPI HandlerRoutine(DWORD dwCtrlType) {
     log_info("signal", "console ctrl handler called: {}", control_code(dwCtrlType));
 
-    if (dwCtrlType == CTRL_C_EVENT) {
-        launcher::shutdown();
-    } else if (dwCtrlType == CTRL_CLOSE_EVENT) {
+    if (dwCtrlType == CTRL_C_EVENT || dwCtrlType == CTRL_CLOSE_EVENT) {
+        // Kill the injected game first; spice.exe shutdown alone would leave it running.
+        launcher::terminate_injected_child();
         launcher::shutdown();
     }
 
