@@ -180,48 +180,40 @@ struct BulkTransferControl {
     ULONG pipe_num;
 };
 
-// FX2 interrupt write. node/cmd stay at 2/3; lights are not in the old ezusb slots.
-#pragma pack(push, 1)
+// EzusbTransfer1 (the path Sirius takes) uses 16-byte interrupt pipes.
+// Node and cmd are at 2 and 3. Deck lights are the leading uint16.
 struct InterruptWritePacket {
-    uint8_t unk0;
-    uint8_t unk1;
+    uint16_t deck_lights;
     uint8_t node;
     uint8_t cmd;
     uint8_t cmd_detail[2];
-    uint8_t unk2;
-    uint8_t unk3;
     uint8_t panel_lights;
-    uint8_t unk4;
-    uint8_t unk5;
-    uint16_t deck_lights;
-    uint8_t unk6;
+    uint8_t unk0;
     uint8_t top_lamps;
     uint8_t top_neons;
-    uint8_t seg16[9];
-    uint8_t padding[39];
-};
-#pragma pack(pop)
-static_assert(sizeof(InterruptWritePacket) == 64, "FX2 interrupt write is 64 bytes");
-
-// 64-byte FX2 interrupt read. Sirius has two decoders:
-// EzusbIodev1JDJ un-inverts bytes 0-3. EzusbIodev2JDJ un-inverts bytes
-// 8, 10 and 11 as the buttons and byte 12 as the board-id byte.
-#pragma pack(push, 1)
-struct InterruptReadPacket {
-    uint32_t iodev1_pad;
-    uint8_t status;
+    uint8_t fpga_run;
+    uint8_t unk2;
+    uint8_t unk3;
+    uint8_t unk4;
     uint8_t unk5;
     uint8_t unk6;
-    uint8_t iodev1_p2_turntable;
-    uint32_t iodev2_pad;
-    uint8_t board_id;
+};
+
+// EzusbIodev1JDJ un-inverts this dword. Test is bit 28, service is bit 29.
+struct InterruptReadPacket {
+    uint32_t inverted_pad;
+    uint8_t status;
+    uint8_t unk0;
+    uint8_t unk1;
     uint8_t p2_turntable;
     uint8_t p1_turntable;
+    uint8_t seq_no;
+    uint8_t fpga2_check_flag_unkn;
+    uint8_t fpga_write_ready;
+    uint8_t serial_io_busy_flag;
     uint8_t sliders[3];
-    uint8_t padding[46];
 };
-#pragma pack(pop)
-static_assert(sizeof(InterruptReadPacket) == 64, "FX2 interrupt read is 64 bytes");
+static_assert(sizeof(InterruptReadPacket) == 16, "Sirius interrupt read is 16 bytes");
 
 struct BulkPacket {
     uint8_t node;
@@ -646,7 +638,8 @@ PadBits read_pad_bits() {
     return bits;
 }
 
-// EzusbIodev1JDJ: keys<<8, panel<<24, sys<<28, coin-mech<<22
+// EzusbIodev1JDJ: keys<<8, panel<<24, sys<<28, coin-mech<<22.
+// The game un-inverts the dword, so test lands on bit 28 and service on bit 29.
 uint32_t build_iidx_pad() {
     const PadBits bits = read_pad_bits();
     uint32_t pad = ((bits.keys & 0x3FFFu) << 8)
@@ -662,33 +655,21 @@ uint32_t build_iidx_pad() {
     return ~pad;
 }
 
-// EzusbIodev2JDJ: keys<<16, panel in the low nibble, test/service at bits 4-5
-uint32_t build_iidx_pad_fx2() {
-    const PadBits bits = read_pad_bits();
-    const uint32_t pad = ((bits.keys & 0x3FFFu) << 16)
-            | (bits.panel & 0x0Fu)
-            | ((bits.sys & 0x07u) << 4)
-            | (((bits.sys >> 2) & 0x01u) << 30);
-    return ~pad;
-}
-
 bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
     if (nOutBufferSize < sizeof(InterruptReadPacket) || !lpOutBuffer) {
         return false;
     }
 
     InterruptReadPacket msg {};
-    msg.iodev1_pad = build_iidx_pad();
+    msg.inverted_pad = build_iidx_pad();
     msg.status = g_status;
     g_status = 0;
-    msg.unk5 = g_seq_no++;
-    msg.iodev1_p2_turntable = get_tt(1, false);
-    msg.iodev2_pad = build_iidx_pad_fx2();
-    // After invert, bit 4 set means D01. 0xFF keeps that bit clear (C02)
-    // and leaves the rest of the board-id byte idle.
-    msg.board_id = 0xFF;
     msg.p2_turntable = get_tt(1, false);
     msg.p1_turntable = get_tt(0, false);
+    msg.seq_no = g_seq_no++;
+    msg.fpga2_check_flag_unkn = 2;
+    msg.fpga_write_ready = 1;
+    msg.serial_io_busy_flag = 0;
     msg.sliders[0] = static_cast<uint8_t>((get_slider(1) << 4) | get_slider(0));
     msg.sliders[1] = static_cast<uint8_t>((get_slider(3) << 4) | get_slider(2));
     msg.sliders[2] = get_slider(4);
@@ -698,14 +679,12 @@ bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
 }
 
 bool interrupt_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
-    // node/cmd begin at offset 2. Accept a short buffer so a smaller
-    // transfer still reaches the node handler; missing light bytes stay 0.
-    if (nOutBufferSize < 6 || !lpOutBuffer) {
+    if (nOutBufferSize < sizeof(InterruptWritePacket) || !lpOutBuffer) {
         return false;
     }
 
     InterruptWritePacket msg {};
-    memcpy(&msg, lpOutBuffer, std::min<DWORD>(nOutBufferSize, sizeof(msg)));
+    memcpy(&msg, lpOutBuffer, sizeof(msg));
 
     write_lamp(msg.deck_lights);
     write_led(msg.panel_lights);
