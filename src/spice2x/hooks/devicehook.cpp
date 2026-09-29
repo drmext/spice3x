@@ -28,6 +28,7 @@ static decltype(CreateFileA) *CreateFileA_orig = nullptr;
 static decltype(CreateFileW) *CreateFileW_orig = nullptr;
 static decltype(DeviceIoControl) *DeviceIoControl_orig = nullptr;
 static decltype(EscapeCommFunction) *EscapeCommFunction_orig = nullptr;
+static decltype(FlushFileBuffers) *FlushFileBuffers_orig = nullptr;
 static decltype(GetCommState) *GetCommState_orig = nullptr;
 static decltype(GetFileSize) *GetFileSize_orig = nullptr;
 static decltype(GetFileSizeEx) *GetFileSizeEx_orig = nullptr;
@@ -425,6 +426,18 @@ static BOOL WINAPI EscapeCommFunction_hook(HANDLE hFile, DWORD dwFunc) {
     return EscapeCommFunction_orig(hFile, dwFunc);
 }
 
+static BOOL WINAPI FlushFileBuffers_hook(HANDLE hFile) {
+    auto *custom_handle = get_custom_handle(hFile);
+    if (custom_handle && !custom_handle->com_pass) {
+        // libacio (IIDX 13-18) will not leave the baud setup step until this
+        // returns success. The fake COM handle is not a kernel object, so the
+        // real call fails and the IC card line stays CHECKING until ICCARD INIT ERR.
+        return TRUE;
+    }
+
+    return FlushFileBuffers_orig(hFile);
+}
+
 static BOOL WINAPI GetCommState_hook(HANDLE hFile, LPDCB lpDCB) {
     auto *custom_handle = get_custom_handle(hFile);
     if (custom_handle && !custom_handle->com_pass) {
@@ -593,6 +606,7 @@ void devicehook_init(HMODULE module) {
     STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
     STORE(DeviceIoControl_orig, detour::iat_try("DeviceIoControl", DeviceIoControl_hook, module));
     STORE(EscapeCommFunction_orig, detour::iat_try("EscapeCommFunction", EscapeCommFunction_hook, module));
+    STORE(FlushFileBuffers_orig, detour::iat_try("FlushFileBuffers", FlushFileBuffers_hook, module));
     STORE(GetCommState_orig, detour::iat_try("GetCommState", GetCommState_hook, module));
     STORE(GetFileSize_orig, detour::iat_try("GetFileSize", GetFileSize_hook, module));
     STORE(GetFileSizeEx_orig, detour::iat_try("GetFileSizeEx", GetFileSizeEx_hook, module));
@@ -635,6 +649,7 @@ void devicehook_init_module(HMODULE module) {
     STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
     STORE(DeviceIoControl_orig, detour::iat_try("DeviceIoControl", DeviceIoControl_hook, module));
     STORE(EscapeCommFunction_orig, detour::iat_try("EscapeCommFunction", EscapeCommFunction_hook, module));
+    STORE(FlushFileBuffers_orig, detour::iat_try("FlushFileBuffers", FlushFileBuffers_hook, module));
     STORE(GetCommState_orig, detour::iat_try("GetCommState", GetCommState_hook, module));
     STORE(GetFileSize_orig, detour::iat_try("GetFileSize", GetFileSize_hook, module));
     STORE(GetFileSizeEx_orig, detour::iat_try("GetFileSizeEx", GetFileSizeEx_hook, module));
@@ -672,6 +687,7 @@ void devicehook_init_trampoline() {
     detour::trampoline_try("kernel32.dll", "CreateFileW", CreateFileW_hook, &CreateFileW_orig);
     detour::trampoline_try("kernel32.dll", "DeviceIoControl", DeviceIoControl_hook, &DeviceIoControl_orig);
     detour::trampoline_try("kernel32.dll", "EscapeCommFunction", EscapeCommFunction_hook, &EscapeCommFunction_orig);
+    detour::trampoline_try("kernel32.dll", "FlushFileBuffers", FlushFileBuffers_hook, &FlushFileBuffers_orig);
     detour::trampoline_try("kernel32.dll", "WriteFile", WriteFile_hook, &WriteFile_orig);
     detour::trampoline_try("kernel32.dll", "GetFileSize", GetFileSize_hook, &GetFileSize_orig);
     detour::trampoline_try("kernel32.dll", "GetFileSizeEx", GetFileSizeEx_hook, &GetFileSizeEx_orig);
