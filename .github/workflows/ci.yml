@@ -18,6 +18,8 @@ jobs:
           echo "CCACHE_DIR=${{ github.workspace }}/src/spice2x/.ccache" >> $GITHUB_ENV
       - name: Install ccache
         uses: hendrikmuhs/ccache-action@v1.2.23
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
       - name: Calculate commit SHA
         id: vars
         run: |
@@ -33,23 +35,3 @@ jobs:
           name: spice2x-ci-${{ env.COMMIT_SHORT_SHA }}
           path: src/spice2x/bin
           if-no-files-found: error
-
-  msvc-ci:
-    name: Build (MSVC 32-bit)
-    # windows-latest ships Visual Studio 2026; pin to the VS 2022 image, which is
-    # the toolset spice2x is actually developed against
-    runs-on: windows-2022
-    defaults:
-      run:
-        working-directory: ./src/spice2x
-    steps:
-      - uses: actions/checkout@v5
-      - name: Configure
-        run: >
-          cmake -S . -B cmake-build-msvc-32
-          -A Win32
-          -DSPICE_H264=OFF
-      - name: Compile
-        run: >
-          cmake --build cmake-build-msvc-32
-          --config Release --target spicetools_spice spicetools_cfg

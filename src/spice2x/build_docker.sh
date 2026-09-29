@@ -2,7 +2,24 @@
 
 set -eu
 
-docker build --pull "$PWD/external/docker" -t spicetools/deps --platform linux/x86_64
+# CI skips the AUR x264 compile. The deps image is rebuilt on every Actions
+# runner, so this is the step that was still compiling x264.
+DEPS_BUILD_ARGS=""
+if [ "${SPICE_CI:-}" = "1" ]; then
+	DEPS_BUILD_ARGS="--build-arg INSTALL_X264=0"
+fi
+
+# Actions runners have an empty Docker cache. Buildx stores the deps image
+# layers in the GitHub Actions cache so later runs skip pacman/yay.
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+	docker buildx build --load --pull \
+		--cache-from type=gha,scope=spice-deps \
+		--cache-to type=gha,scope=spice-deps,mode=max \
+		$DEPS_BUILD_ARGS \
+		"$PWD/external/docker" -t spicetools/deps --platform linux/x86_64
+else
+	docker build --pull $DEPS_BUILD_ARGS "$PWD/external/docker" -t spicetools/deps --platform linux/x86_64
+fi
 docker build --build-context gitroot="$PWD/../../.git" . -t spicetools/spice:latest
 
 # Interactive TTY if available, so docker build can be Ctrl+C'd
