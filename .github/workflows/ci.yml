@@ -24,6 +24,9 @@ jobs:
           calculatedSha=$(git rev-parse --short ${{ github.sha }})
           echo "COMMIT_SHORT_SHA=$calculatedSha" >> $GITHUB_ENV
       - name: Compile
+        env:
+          # 32-bit spice + spicecfg only; skip x264, linux, laa, 64-bit, WinXP
+          SPICE_CI: "1"
         run: ./build_docker.sh
       - uses: actions/upload-artifact@v6
         with:
@@ -32,20 +35,10 @@ jobs:
           if-no-files-found: error
 
   msvc-ci:
-    name: Build (MSVC ${{ matrix.arch }}-bit)
+    name: Build (MSVC 32-bit)
     # windows-latest ships Visual Studio 2026; pin to the VS 2022 image, which is
     # the toolset spice2x is actually developed against
     runs-on: windows-2022
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: 32
-            platform: Win32
-            target: spicetools_spice spicetools_cfg
-          - arch: 64
-            platform: x64
-            target: spicetools_spice64
     defaults:
       run:
         working-directory: ./src/spice2x
@@ -53,9 +46,10 @@ jobs:
       - uses: actions/checkout@v5
       - name: Configure
         run: >
-          cmake -S . -B cmake-build-msvc-${{ matrix.arch }}
-          -A ${{ matrix.platform }}
+          cmake -S . -B cmake-build-msvc-32
+          -A Win32
+          -DSPICE_H264=OFF
       - name: Compile
         run: >
-          cmake --build cmake-build-msvc-${{ matrix.arch }}
-          --config Release --target ${{ matrix.target }}
+          cmake --build cmake-build-msvc-32
+          --config Release --target spicetools_spice spicetools_cfg

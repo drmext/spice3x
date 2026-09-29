@@ -279,8 +279,10 @@ endif()
 
 # x264 for the API H.264 video stream, installed into the mingw sysroots by the
 # deps image. The WinXP toolchains deliberately go without it and serve MJPEG only.
+# CI can pass -DSPICE_H264=OFF to skip the static link and shorten the build.
+option(SPICE_H264 "Link x264 for the API H.264 stream" ON)
 add_library(spice_x264 INTERFACE)
-if(NOT SPICE_XP)
+if(SPICE_H264 AND NOT SPICE_XP)
     # search static archives only: the mingw package also ships an import library,
     # and linking that one would pull in a libx264 DLL at runtime
     set(SPICE_X264_SUFFIXES ${CMAKE_FIND_LIBRARY_SUFFIXES})
@@ -297,6 +299,8 @@ if(NOT SPICE_XP)
         message(WARNING
                 "x264 not found: the api video stream will only offer MJPEG")
     endif()
+elseif(NOT SPICE_H264)
+    message(STATUS "SPICE_H264=OFF: the api video stream will only offer MJPEG")
 endif()
 
 # fpng's SIMD needs the whole unit built for SSE4.1, which its runtime CPU check

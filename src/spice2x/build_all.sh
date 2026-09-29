@@ -106,6 +106,19 @@ if ((BUILD_XP_64_ENABLE > 0)) && [ -f "$TOOLCHAIN_WINXP_64" ]; then
 	BUILD_XP_64=1;
 fi
 
+# Narrow CI build: 32-bit spice + spicecfg only, without x264 / linux / laa / 64-bit / WinXP
+CMAKE_EXTRA_FLAGS=""
+BUILD_64=1
+if [ "${SPICE_CI:-0}" = "1" ]; then
+	TARGETS_32="spicetools_cfg spicetools_spice"
+	TARGETS_64=""
+	BUILD_64=0
+	BUILD_XP_32=0
+	BUILD_XP_64=0
+	CMAKE_EXTRA_FLAGS="-DSPICE_H264=OFF"
+	echo "SPICE_CI=1: building 32-bit spicecfg and spice only (no x264, linux, laa, 64-bit, or WinXP)"
+fi
+
 # determine number of cores
 CORES=$(nproc)
 
@@ -155,21 +168,27 @@ time (
 	fi
 	mkdir -p ${BUILDDIR_32}
 	pushd ${BUILDDIR_32} > /dev/null
-	cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_32} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} "$OLDPWD" && ninja ${TARGETS_32}
+	cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_32} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ${CMAKE_EXTRA_FLAGS} "$OLDPWD" && ninja ${TARGETS_32}
 	popd > /dev/null
 
 	# 64 bit
-	echo ""
-	echo "Building 64bit targets..."
-	echo "========================="
-	if ((CLEAN_BUILD > 0))
+	if ((BUILD_64 > 0))
 	then
-		rm -rf ${BUILDDIR_64}
+		echo ""
+		echo "Building 64bit targets..."
+		echo "========================="
+		if ((CLEAN_BUILD > 0))
+		then
+			rm -rf ${BUILDDIR_64}
+		fi
+		mkdir -p ${BUILDDIR_64}
+		pushd ${BUILDDIR_64} > /dev/null
+		cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_64} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} ${CMAKE_EXTRA_FLAGS} "$OLDPWD" && ninja ${TARGETS_64}
+		popd > /dev/null
+	else
+		echo ""
+		echo "Skipping 64bit builds"
 	fi
-	mkdir -p ${BUILDDIR_64}
-	pushd ${BUILDDIR_64} > /dev/null
-	cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_64} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} "$OLDPWD" && ninja ${TARGETS_64}
-	popd > /dev/null
 
 	if ((BUILD_XP_32 > 0))
 	then
@@ -183,7 +202,7 @@ time (
 		fi
 		mkdir -p ${BUILDDIR_WINXP_32}
 		pushd ${BUILDDIR_WINXP_32} > /dev/null
-		cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_WINXP_32} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DSPICE_XP=ON "$OLDPWD" && ninja ${TARGETS_XP32}
+		cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_WINXP_32} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DSPICE_XP=ON ${CMAKE_EXTRA_FLAGS} "$OLDPWD" && ninja ${TARGETS_XP32}
 		popd > /dev/null
 	else
 		echo ""
@@ -202,7 +221,7 @@ time (
 		fi
 		mkdir -p ${BUILDDIR_WINXP_64}
 		pushd ${BUILDDIR_WINXP_64} > /dev/null
-		cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_WINXP_64} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DSPICE_XP=ON "$OLDPWD" && ninja ${TARGETS_XP64}
+		cmake -G "Ninja" -DCMAKE_TOOLCHAIN_FILE=${TOOLCHAIN_WINXP_64} -DCMAKE_BUILD_TYPE=${BUILD_TYPE} -DSPICE_XP=ON ${CMAKE_EXTRA_FLAGS} "$OLDPWD" && ninja ${TARGETS_XP64}
 		popd > /dev/null
 	else
 		echo ""
@@ -220,8 +239,11 @@ echo "============================="
 if ! command -v windows_dll_compat_checker &> /dev/null; then
 	echo "WARNING: windows_dll_compat_checker not found, skipping Win7 compatibility check"
 else
-	windows_dll_compat_checker -s PREMADE/konami_win7_museca_x86_64.ini \
-		${BUILDDIR_64}/spicetools/64/spice64.exe
+	if ((BUILD_64 > 0))
+	then
+		windows_dll_compat_checker -s PREMADE/konami_win7_museca_x86_64.ini \
+			${BUILDDIR_64}/spicetools/64/spice64.exe
+	fi
 	windows_dll_compat_checker -s PREMADE/konami_win7_museca_x86_64_32bit_dlls.ini \
 		${BUILDDIR_32}/spicetools/spicecfg.exe \
 		${BUILDDIR_32}/spicetools/32/spice.exe
