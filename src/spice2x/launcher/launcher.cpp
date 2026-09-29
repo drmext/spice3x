@@ -1981,6 +1981,20 @@ int main_implementation(int argc, char *argv[]) {
 
         graphics_init();
 
+        // The normal launcher creates RI_MGR after this return. Buttons::getState
+        // then stays on last-state, so mapped cabinet input never reaches the game.
+        if (!midi_algo.has_value()) {
+            midi_algo = rawinput::MidiNoteAlgorithm::V2;
+        }
+        rawinput::set_midi_algorithm(midi_algo.value());
+
+        RI_MGR = std::make_unique<rawinput::RawInputManager>();
+        for (const auto &device : sextet_devices) {
+            RI_MGR->sextet_register(device);
+        }
+        hotkeys::enable_raw_input();
+        hotkeys::enable_input();
+
         log_info("launcher", "injected hooks ready; returning control to bm2dx.exe");
         return 0;
     }
