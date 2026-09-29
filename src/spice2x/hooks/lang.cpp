@@ -391,6 +391,26 @@ void hooks::lang::init() {
             "kernel32.dll");
 }
 
+void hooks::lang::init_module(HMODULE module) {
+    if (!module) {
+        return;
+    }
+
+    log_info("hooks::lang", "initializing module {:#x}", reinterpret_cast<uintptr_t>(module));
+
+    auto *prev = detour::iat_try(
+            "MultiByteToWideChar",
+            MultiByteToWideChar_hook,
+            module,
+            "kernel32.dll");
+    if (!MultiByteToWideChar_orig && prev) {
+        MultiByteToWideChar_orig = prev;
+    }
+    if (!prev) {
+        log_warning("hooks::lang", "MultiByteToWideChar not in module IAT");
+    }
+}
+
 bool hooks::lang::is_native_shiftjis() {
     return GetACP() == CODEPAGE_SHIFT_JIS;
 }

@@ -1962,6 +1962,14 @@ int main_implementation(int argc, char *argv[]) {
         eamuse_autodetect_game();
         log_info("launcher", "injected game identity {}", avs::game::get_identifier());
 
+        // Same ACP/Shift-JIS hooks as the normal launcher path. Without these,
+        // Sirius draws Japanese (CreateFontA / MultiByteToWideChar) as mojibake.
+        if (!lang_disable) {
+            hooks::lang::early_init();
+            hooks::lang::init();
+            hooks::lang::init_module(avs::game::DLL_INSTANCE);
+        }
+
         // Match bm2dx.dll IIDX path: show cursor in windowed mode
         if (GRAPHICS_WINDOWED) {
             GRAPHICS_SHOW_CURSOR = true;

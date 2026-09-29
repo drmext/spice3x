@@ -302,6 +302,35 @@ namespace games::iidx {
 
 #endif
 
+    // Sirius polls these every frame once the reader is up. Real libacio returns
+    // keep-alive faults, and after 90s the game shows CARD DEVICE ERROR 1:1.
+    // Boot still uses the COM ICCA emulator; only the keep-alive imports are stubbed.
+    static int __cdecl ac_io_icca_send_keep_alive_packet_hook(int, int, int) {
+        return 0;
+    }
+
+    static bool __cdecl ac_io_icca_get_keep_alive_error_hook(int, DWORD *error) {
+        if (error) {
+            *error = 0;
+        }
+        return false;
+    }
+
+    static void jdj_hook_icca_keepalive(HMODULE module) {
+        if (!detour::iat_try(
+                "ac_io_icca_send_keep_alive_packet",
+                ac_io_icca_send_keep_alive_packet_hook,
+                module)) {
+            log_warning("iidx", "JDJ: ac_io_icca_send_keep_alive_packet not in IAT");
+        }
+        if (!detour::iat_try(
+                "ac_io_icca_get_keep_alive_error",
+                ac_io_icca_get_keep_alive_error_hook,
+                module)) {
+            log_warning("iidx", "JDJ: ac_io_icca_get_keep_alive_error not in IAT");
+        }
+    }
+
     IIDXGame::IIDXGame() : Game("Beatmania IIDX") {
         logger::hook_add(log_hook, this);
     }
@@ -349,6 +378,7 @@ namespace games::iidx {
                 devicehook_add(new acioemu::ACIOHandle(L"COM1", 2, true));
                 // Patch the exe IAT after threads resume (PEB walk skips it)
                 devicehook_init_module(avs::game::DLL_INSTANCE);
+                jdj_hook_icca_keepalive(avs::game::DLL_INSTANCE);
             } else {
                 // IIDX <25 with EZUSB input device
                 devicehook_add(new EZUSBHandle());
