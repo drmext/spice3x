@@ -157,13 +157,17 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
                         }
                         this->cards[unit] = nullptr;
                         this->hold[unit] = false;
+                        break;
                     default:
                         break;
                 }
             }
 
-            // no break, return status
-            [[fallthrough]];
+            // Sirius libacio expects a 1-byte status 0 (not a 16-byte poll)
+            auto msg = this->create_msg_status(msg_in, 0x00);
+            write_msg(msg, response_buffer);
+            delete msg;
+            break;
         }
         case 0x0134: { // GET STATUS
 
