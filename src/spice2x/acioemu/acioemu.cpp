@@ -27,6 +27,10 @@ void ACIOEmu::add_device(ACIODeviceEmu *device) {
     this->devices->push_back(device);
 }
 
+void ACIOEmu::set_legacy_mode(bool enabled) {
+    this->legacy_mode = enabled;
+}
+
 void ACIOEmu::write(uint8_t byte) {
 
     // insert into buffer
@@ -67,7 +71,14 @@ void ACIOEmu::write(uint8_t byte) {
          */
         this->response_buffer->put(ACIO_SOF);
         this->response_buffer->put(ACIO_SOF);
-        handshake_counter--;
+        // Legacy libacio treats the next non-AA as a new frame. Leaving the
+        // counter raised made the following SOF look like more autobaud and
+        // prefixed 0xAA 0xAA onto that frame.
+        if (this->legacy_mode) {
+            handshake_counter = 0;
+        } else {
+            handshake_counter--;
+        }
         return;
     }
 

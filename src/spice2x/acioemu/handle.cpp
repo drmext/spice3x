@@ -12,6 +12,9 @@ acioemu::ACIOHandle::ACIOHandle(LPCWSTR lpCOMPort, uint8_t iccaNodeCount, bool l
     this->com_port = lpCOMPort;
     this->icca_node_count = iccaNodeCount;
     this->legacy_mode = legacyMode;
+    if (legacyMode) {
+        acio_emu.set_legacy_mode(true);
+    }
 }
 
 bool acioemu::ACIOHandle::open(LPCWSTR lpFileName) {
@@ -143,9 +146,32 @@ int acioemu::ACIOHandle::read(LPVOID lpBuffer, DWORD nNumberOfBytesToRead) {
         return (int) bytes_read;
     }
 
+    if (nNumberOfBytesToRead == 0) {
+        return 0;
+    }
+
+    legacy_drain_emu();
+
+    // Autobaud is a run of raw 0xAA with no frame behind it. libacio's init
+    // counts those bytes. Waiting for a framed message here drops them, and
+    // the reader never leaves CHECKING.
+    if (legacy_frame_left == 0 && !legacy_pending.empty()) {
+        size_t aas = 0;
+        while (aas < legacy_pending.size() && legacy_pending[aas] == ACIO_SOF) {
+            aas++;
+        }
+        if (aas == legacy_pending.size()) {
+            const size_t n = (std::min)(static_cast<size_t>(nNumberOfBytesToRead), aas);
+            memcpy(buffer, legacy_pending.data(), n);
+            legacy_pending.erase(legacy_pending.begin(),
+                    legacy_pending.begin() + static_cast<std::ptrdiff_t>(n));
+            return static_cast<int>(n);
+        }
+    }
+
     // Old libacio reads in short chunks; deliver a prefix of one frame and
     // keep the rest for the next ReadFile. Do not start a second frame here.
-    if (!legacy_ensure_frame() || nNumberOfBytesToRead == 0) {
+    if (!legacy_ensure_frame()) {
         return 0;
     }
 
@@ -182,6 +208,17 @@ int acioemu::ACIOHandle::device_io(
 size_t acioemu::ACIOHandle::bytes_available() {
     if (!legacy_mode) {
         return acio_emu.bytes_available();
+    }
+
+    legacy_drain_emu();
+    if (legacy_frame_left == 0 && !legacy_pending.empty()) {
+        size_t aas = 0;
+        while (aas < legacy_pending.size() && legacy_pending[aas] == ACIO_SOF) {
+            aas++;
+        }
+        if (aas == legacy_pending.size()) {
+            return aas;
+        }
     }
 
     if (!legacy_ensure_frame()) {
