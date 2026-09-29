@@ -403,9 +403,17 @@ static BOOL WINAPI DeviceIoControl_hook(HANDLE hDevice, DWORD dwIoControlCode, L
         int count = custom_handle->device_io(dwIoControlCode, lpInBuffer, nInBufferSize, lpOutBuffer, nOutBufferSize);
         if (count >= 0) {
             SetLastError(0);
-            *lpBytesReturned = (DWORD) count;
+            if (lpBytesReturned) {
+                *lpBytesReturned = (DWORD) count;
+            }
+            // Sirius waits on the event, then trusts OVERLAPPED.Internal.
+            // Leaving that as STATUS_PENDING makes GetOverlappedResult drop the read.
             if (lpOverlapped) {
-                SetEvent(lpOverlapped->hEvent);
+                lpOverlapped->Internal = 0;
+                lpOverlapped->InternalHigh = static_cast<ULONG_PTR>(count);
+                if (lpOverlapped->hEvent) {
+                    SetEvent(lpOverlapped->hEvent);
+                }
             }
             return true;
         } else {

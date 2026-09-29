@@ -180,37 +180,48 @@ struct BulkTransferControl {
     ULONG pipe_num;
 };
 
-// ezusb-iidx interrupt packets (not FX2 64-byte framing)
+// FX2 interrupt write. node/cmd stay at 2/3; lights are not in the old ezusb slots.
+#pragma pack(push, 1)
 struct InterruptWritePacket {
-    uint16_t deck_lights;
+    uint8_t unk0;
+    uint8_t unk1;
     uint8_t node;
     uint8_t cmd;
     uint8_t cmd_detail[2];
-    uint8_t panel_lights;
-    uint8_t unk0;
-    uint8_t top_lamps;
-    uint8_t top_neons;
-    uint8_t fpga_run;
     uint8_t unk2;
     uint8_t unk3;
+    uint8_t panel_lights;
     uint8_t unk4;
     uint8_t unk5;
+    uint16_t deck_lights;
     uint8_t unk6;
+    uint8_t top_lamps;
+    uint8_t top_neons;
+    uint8_t seg16[9];
+    uint8_t padding[39];
 };
+#pragma pack(pop)
+static_assert(sizeof(InterruptWritePacket) == 64, "FX2 interrupt write is 64 bytes");
 
+// 64-byte FX2 interrupt read. Sirius has two decoders:
+// EzusbIodev1JDJ un-inverts bytes 0-3. EzusbIodev2JDJ un-inverts bytes
+// 8, 10 and 11 as the buttons and byte 12 as the board-id byte.
+#pragma pack(push, 1)
 struct InterruptReadPacket {
-    uint32_t inverted_pad;
+    uint32_t iodev1_pad;
     uint8_t status;
-    uint8_t unk0;
-    uint8_t unk1;
+    uint8_t unk5;
+    uint8_t unk6;
+    uint8_t iodev1_p2_turntable;
+    uint32_t iodev2_pad;
+    uint8_t board_id;
     uint8_t p2_turntable;
     uint8_t p1_turntable;
-    uint8_t seq_no;
-    uint8_t fpga2_check_flag_unkn;
-    uint8_t fpga_write_ready;
-    uint8_t serial_io_busy_flag;
     uint8_t sliders[3];
+    uint8_t padding[46];
 };
+#pragma pack(pop)
+static_assert(sizeof(InterruptReadPacket) == 64, "FX2 interrupt read is 64 bytes");
 
 struct BulkPacket {
     uint8_t node;
@@ -595,45 +606,53 @@ bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
     }
 }
 
-// ezusb-iidx pad packing (keys<<8, panel<<24, sys<<28, coin-mech<<22)
-uint32_t build_iidx_pad() {
-    uint32_t panel = 0;
-    uint32_t sys = 0;
-    uint32_t keys = 0;
+struct PadBits {
+    uint32_t panel;
+    uint32_t sys;
+    uint32_t keys;
+};
+
+PadBits read_pad_bits() {
+    PadBits bits {};
     auto &buttons = get_buttons();
 
     auto pressed = [&](size_t index) {
         return GameAPI::Buttons::getState(RI_MGR, buttons.at(index));
     };
 
-    if (pressed(Buttons::P1_Start)) panel |= 1u << 0;
-    if (pressed(Buttons::P2_Start)) panel |= 1u << 1;
-    if (pressed(Buttons::VEFX)) panel |= 1u << 2;
-    if (pressed(Buttons::Effect)) panel |= 1u << 3;
+    if (pressed(Buttons::P1_Start)) bits.panel |= 1u << 0;
+    if (pressed(Buttons::P2_Start)) bits.panel |= 1u << 1;
+    if (pressed(Buttons::VEFX)) bits.panel |= 1u << 2;
+    if (pressed(Buttons::Effect)) bits.panel |= 1u << 3;
 
-    if (pressed(Buttons::Test)) sys |= 1u << 0;
-    if (pressed(Buttons::Service)) sys |= 1u << 1;
-    if (pressed(Buttons::CoinMech)) sys |= 1u << 2;
+    if (pressed(Buttons::Test)) bits.sys |= 1u << 0;
+    if (pressed(Buttons::Service)) bits.sys |= 1u << 1;
+    if (pressed(Buttons::CoinMech)) bits.sys |= 1u << 2;
 
-    if (pressed(Buttons::P1_1)) keys |= 1u << 0;
-    if (pressed(Buttons::P1_2)) keys |= 1u << 1;
-    if (pressed(Buttons::P1_3)) keys |= 1u << 2;
-    if (pressed(Buttons::P1_4)) keys |= 1u << 3;
-    if (pressed(Buttons::P1_5)) keys |= 1u << 4;
-    if (pressed(Buttons::P1_6)) keys |= 1u << 5;
-    if (pressed(Buttons::P1_7)) keys |= 1u << 6;
-    if (pressed(Buttons::P2_1)) keys |= 1u << 7;
-    if (pressed(Buttons::P2_2)) keys |= 1u << 8;
-    if (pressed(Buttons::P2_3)) keys |= 1u << 9;
-    if (pressed(Buttons::P2_4)) keys |= 1u << 10;
-    if (pressed(Buttons::P2_5)) keys |= 1u << 11;
-    if (pressed(Buttons::P2_6)) keys |= 1u << 12;
-    if (pressed(Buttons::P2_7)) keys |= 1u << 13;
+    if (pressed(Buttons::P1_1)) bits.keys |= 1u << 0;
+    if (pressed(Buttons::P1_2)) bits.keys |= 1u << 1;
+    if (pressed(Buttons::P1_3)) bits.keys |= 1u << 2;
+    if (pressed(Buttons::P1_4)) bits.keys |= 1u << 3;
+    if (pressed(Buttons::P1_5)) bits.keys |= 1u << 4;
+    if (pressed(Buttons::P1_6)) bits.keys |= 1u << 5;
+    if (pressed(Buttons::P1_7)) bits.keys |= 1u << 6;
+    if (pressed(Buttons::P2_1)) bits.keys |= 1u << 7;
+    if (pressed(Buttons::P2_2)) bits.keys |= 1u << 8;
+    if (pressed(Buttons::P2_3)) bits.keys |= 1u << 9;
+    if (pressed(Buttons::P2_4)) bits.keys |= 1u << 10;
+    if (pressed(Buttons::P2_5)) bits.keys |= 1u << 11;
+    if (pressed(Buttons::P2_6)) bits.keys |= 1u << 12;
+    if (pressed(Buttons::P2_7)) bits.keys |= 1u << 13;
+    return bits;
+}
 
-    uint32_t pad = ((keys & 0x3FFFu) << 8)
-            | ((panel & 0x0Fu) << 24)
-            | ((sys & 0x07u) << 28)
-            | (((sys >> 2) & 0x01u) << 22);
+// EzusbIodev1JDJ: keys<<8, panel<<24, sys<<28, coin-mech<<22
+uint32_t build_iidx_pad() {
+    const PadBits bits = read_pad_bits();
+    uint32_t pad = ((bits.keys & 0x3FFFu) << 8)
+            | ((bits.panel & 0x0Fu) << 24)
+            | ((bits.sys & 0x07u) << 28)
+            | (((bits.sys >> 2) & 0x01u) << 22);
 
     // Coin mode state in bit 31 (mode1 -> 0, mode2 -> 1)
     pad &= ~(1u << 31);
@@ -643,21 +662,33 @@ uint32_t build_iidx_pad() {
     return ~pad;
 }
 
+// EzusbIodev2JDJ: keys<<16, panel in the low nibble, test/service at bits 4-5
+uint32_t build_iidx_pad_fx2() {
+    const PadBits bits = read_pad_bits();
+    const uint32_t pad = ((bits.keys & 0x3FFFu) << 16)
+            | (bits.panel & 0x0Fu)
+            | ((bits.sys & 0x07u) << 4)
+            | (((bits.sys >> 2) & 0x01u) << 30);
+    return ~pad;
+}
+
 bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
     if (nOutBufferSize < sizeof(InterruptReadPacket) || !lpOutBuffer) {
         return false;
     }
 
     InterruptReadPacket msg {};
-    msg.inverted_pad = build_iidx_pad();
+    msg.iodev1_pad = build_iidx_pad();
     msg.status = g_status;
     g_status = 0;
+    msg.unk5 = g_seq_no++;
+    msg.iodev1_p2_turntable = get_tt(1, false);
+    msg.iodev2_pad = build_iidx_pad_fx2();
+    // After invert, bit 4 set means D01. 0xFF keeps that bit clear (C02)
+    // and leaves the rest of the board-id byte idle.
+    msg.board_id = 0xFF;
     msg.p2_turntable = get_tt(1, false);
     msg.p1_turntable = get_tt(0, false);
-    msg.seq_no = g_seq_no++;
-    msg.fpga2_check_flag_unkn = 2;
-    msg.fpga_write_ready = 1;
-    msg.serial_io_busy_flag = 0;
     msg.sliders[0] = static_cast<uint8_t>((get_slider(1) << 4) | get_slider(0));
     msg.sliders[1] = static_cast<uint8_t>((get_slider(3) << 4) | get_slider(2));
     msg.sliders[2] = get_slider(4);
@@ -667,12 +698,14 @@ bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
 }
 
 bool interrupt_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
-    if (nOutBufferSize < sizeof(InterruptWritePacket) || !lpOutBuffer) {
+    // node/cmd begin at offset 2. Accept a short buffer so a smaller
+    // transfer still reaches the node handler; missing light bytes stay 0.
+    if (nOutBufferSize < 6 || !lpOutBuffer) {
         return false;
     }
 
     InterruptWritePacket msg {};
-    memcpy(&msg, lpOutBuffer, sizeof(msg));
+    memcpy(&msg, lpOutBuffer, std::min<DWORD>(nOutBufferSize, sizeof(msg)));
 
     write_lamp(msg.deck_lights);
     write_led(msg.panel_lights);
