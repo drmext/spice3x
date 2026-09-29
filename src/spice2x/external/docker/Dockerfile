@@ -29,7 +29,11 @@ RUN curl -fsSL "https://github.com/mon/windows-dll-compat-checker/releases/downl
 RUN printf '%s\n' 'MAKEFLAGS="-j$(nproc)"' > /home/user/.makepkg.conf \
     && chown user: /home/user/.makepkg.conf
 
-# libjpeg-turbo for JPEG encoding, x264 for the API H.264 video stream. Only the
-# mingw-w64 toolchains get these; the WinXP targets build without JPEG support
-# and without the stream encoder.
-RUN su user -c "yay --noconfirm -S mingw-w64-libjpeg-turbo mingw-w64-x264"
+# libjpeg-turbo for JPEG encoding. Only the mingw-w64 toolchains get it; the
+# WinXP targets build without JPEG support.
+RUN su user -c "yay --noconfirm -S mingw-w64-libjpeg-turbo"
+
+# x264 for the API H.264 video stream. CI passes INSTALL_X264=0 so this AUR
+# package is not compiled. Release and local builds keep the default.
+ARG INSTALL_X264=1
+RUN if [ "$INSTALL_X264" = "1" ]; then su user -c "yay --noconfirm -S mingw-w64-x264"; fi
