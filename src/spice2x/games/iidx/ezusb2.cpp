@@ -844,12 +844,13 @@ int ioctl_pipe_read(LPVOID lpInBuffer, DWORD nInBufferSize,
             if (!interrupt_read(lpOutBuffer, nOutBufferSize)) {
                 return -1;
             }
-            return static_cast<int>(nOutBufferSize);
+            // Report the packet size, not the caller's buffer (bemani read.pos)
+            return static_cast<int>(sizeof(InterruptReadPacket));
         case PIPE_BULK_IN:
             if (!bulk_read(lpOutBuffer, nOutBufferSize)) {
                 return -1;
             }
-            return static_cast<int>(nOutBufferSize);
+            return static_cast<int>(sizeof(BulkPacket));
         default:
             log_warning("iidx::ezusb2", "no such read pipe {}", ctl->pipe_num);
             return -1;
