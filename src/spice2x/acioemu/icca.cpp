@@ -109,7 +109,7 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
             delete msg;
             break;
         }
-        case 0x0130: { // REINITIALIZE
+        case 0x0130: { // QUEUE_LOOP_START / REINITIALIZE
 
             // send status 0
             auto msg = this->create_msg_status(msg_in, 0x00);
@@ -117,38 +117,32 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
             delete msg;
             break;
         }
-        case 0x0131: { // READ CARD UID
-
-            // build data array
+        case 0x0131: { // ENGAGE (bemanitools AC_IO_ICCA_CMD_ENGAGE)
+            // Must return the real 16-byte state. Forcing IDLE (0x01) while
+            // sensors/UID still show a card makes FDD–JDJ throw
+            // CARD DEVICE ERROR (UNKNOW STATUS) after test-menu insert.
             auto msg = this->create_msg(msg_in, 16);
-
-            // update things
             update_card(unit);
             update_keypad(unit);
             update_status(unit);
-
-            // copy status
             memcpy(msg->cmd.raw, &status[unit * 16], 16);
-
-            // explicitly set no card since this is just read
-            msg->cmd.raw[0] = 0x01;
-
-            // write message
             write_msg(msg, response_buffer);
             delete msg;
             break;
         }
-        case 0x0135: { // SET ACTION
+        case 0x0135: { // SET_SLOT_STATE
 
+            uint8_t subcmd = 0;
             // check for data
             if (msg_in->cmd.data_size >= 2) {
+                subcmd = msg_in->cmd.raw[1];
 
                 // subcommand
-                switch (msg_in->cmd.raw[1]) {
-                    case 0x00: // ACCEPT DISABLE
+                switch (subcmd) {
+                    case 0x00: // ACCEPT DISABLE / CLOSE
                         this->accept[unit] = false;
                         break;
-                    case 0x11: // ACCEPT ENABLE
+                    case 0x11: // ACCEPT ENABLE / OPEN
                         this->accept[unit] = true;
                         break;
                     case 0x12: // EJECT
@@ -163,8 +157,11 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
                 }
             }
 
-            // Sirius libacio expects a 1-byte status 0 (not a 16-byte poll)
-            auto msg = this->create_msg_status(msg_in, 0x00);
+            // bemanitools replies with the subcmd as the 1-byte status for
+            // non-v150. Sirius (JDJ) historically expected 0; FDD–I00 need the
+            // subcmd echo or card insert in test menu faults.
+            const uint8_t st = avs::game::is_model("JDJ") ? 0x00 : subcmd;
+            auto msg = this->create_msg_status(msg_in, st);
             write_msg(msg, response_buffer);
             delete msg;
             break;
