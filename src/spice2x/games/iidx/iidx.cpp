@@ -383,6 +383,8 @@ namespace games::iidx {
                     || avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
             const bool is_2235_desc = is_c02_era || avs::game::is_model("JDJ");
             const bool use_com_icca = avs::game::is_model({"FDD", "GLD", "HDD", "I00", "JDJ"});
+            const bool use_icca_keepalive =
+                    avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
 
             // EZ-USB setupapi entry (same GUID for 2235 and FX2 generations)
             SETUPAPI_SETTINGS settings1 {};
@@ -416,12 +418,12 @@ namespace games::iidx {
                 // 9-17: ezusb.sys ioctls + 16-byte Anchor packets (v1 or v2 nodes)
                 devicehook_add(new EZUSB2Handle());
                 if (use_com_icca) {
-                    // DistorteD and Sirius: two ICCA nodes on COM1; legacy framing
+                    // DistorteD and 14-17: two ICCA nodes on COM1; legacy framing
                     devicehook_add(new acioemu::ACIOHandle(L"COM1", 2, true));
                 }
                 // Patch the exe IAT after threads resume (PEB walk skips it)
                 devicehook_init_module(avs::game::DLL_INSTANCE);
-                if (use_com_icca) {
+                if (use_icca_keepalive) {
                     jdj_hook_icca_keepalive(avs::game::DLL_INSTANCE);
                 }
                 if (is_c02_era) {

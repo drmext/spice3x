@@ -9,8 +9,8 @@ namespace ezusb_serial {
 
 void init();
 uint8_t process_cmd(uint8_t cmd);
-bool read_packet(uint8_t *pkg60);   // BulkPacket: node, page, payload[60]
-bool write_packet(const uint8_t *pkg60);
+bool read_packet(uint8_t *packet);   // BulkPacket: node, page, payload[62]
+bool write_packet(const uint8_t *packet);
 bool read_busy();
 bool write_busy();
 

@@ -1,9 +1,11 @@
 #include "ezusb_serial.h"
 
 #include <cstring>
+#include <iterator>
 #include <mutex>
 #include <vector>
 
+#include "avs/game.h"
 #include "misc/eamuse.h"
 #include "util/logging.h"
 
@@ -14,8 +16,8 @@ constexpr size_t kPage = 62;
 constexpr size_t kBuf = 512;
 constexpr size_t kHdr = 4; // msg_cmd, node_id, node_cmd, payload_len
 constexpr uint8_t HEADER_BYTE = 0xAA;
-constexpr uint8_t CMD_NODE_REQ = 0x80;
-constexpr uint8_t CMD_NODE_RESP = 0x81;
+constexpr uint8_t CMD_NODE_REQ = 0x00;
+constexpr uint8_t CMD_NODE_RESP = 0x01;
 constexpr uint8_t CMD_H8_REQ = 0xAA;
 constexpr uint8_t CMD_H8_RESP = 0xA5;
 constexpr uint8_t H8_NODE_ENUM = 0x01;
@@ -60,8 +62,116 @@ struct Slot {
     uint8_t card_id[8] {};
     uint8_t keypad_code = 0;
     uint16_t last_keypad = 0;
+    uint8_t card_slot_state = 0;
+    bool write_loopback_valid = false;
+    uint8_t write_loopback[128] {};
 };
 Slot g_slot[2] {};
+
+#pragma pack(push, 1)
+struct MagCardData {
+    struct {
+        uint8_t flags;
+        uint8_t card_version[3];
+        uint8_t checksum;
+    } header;
+    struct {
+        uint8_t card_id[8];
+        uint8_t card_type;
+        uint8_t checksum;
+    } sector[5];
+    uint8_t padding[8];
+    uint8_t checksum[2];
+};
+#pragma pack(pop)
+
+uint8_t crc8(const uint8_t *data, size_t len) {
+    uint8_t crc = 0xFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc & 1) ? static_cast<uint8_t>((crc >> 1) ^ 0x8C) : crc >> 1;
+        }
+    }
+    return static_cast<uint8_t>(~crc);
+}
+
+uint16_t crc16_reflected(const uint8_t *data, size_t len, bool complement) {
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int bit = 0; bit < 8; bit++) {
+            crc = (crc & 1) ? static_cast<uint16_t>((crc >> 1) ^ 0x8408) : crc >> 1;
+        }
+    }
+    return complement ? static_cast<uint16_t>(~crc) : crc;
+}
+
+const char *card_version() {
+    if (avs::game::is_model("D01")) return "D01";
+    if (avs::game::is_model("E11")) return "E11";
+    if (avs::game::is_model("ECO")) return "ECO";
+    return "C02";
+}
+
+void generate_mag_card(uint8_t *out, const uint8_t card_id[8]) {
+    MagCardData card {};
+    const char *version = card_version();
+
+    card.header.flags = (1 << 3) | (1 << 6);
+    card.header.card_version[2] = 1;
+    card.header.card_version[0] =
+            (card.header.card_version[0] & 0xC0) | ((version[0] - 0x20) & 0x3F);
+    card.header.card_version[1] =
+            static_cast<uint8_t>(((version[1] - 0x20) & 0x3F) << 2)
+            | static_cast<uint8_t>(((version[2] - 0x20) >> 4) & 0x03);
+    card.header.card_version[2] =
+            static_cast<uint8_t>(((version[2] - 0x20) & 0x0F) << 4)
+            | (card.header.card_version[2] & 0x0F);
+    card.header.checksum = crc8(&card.header.flags, 4);
+
+    uint8_t reversed[8];
+    for (int i = 0; i < 8; i++) {
+        reversed[7 - i] = card_id[i];
+    }
+    for (auto &sector : card.sector) {
+        auto *raw = reinterpret_cast<uint8_t *>(&sector);
+        if (strcmp(version, "C02") == 0) {
+            raw[0] = 0; // 9th stores card type before the id
+            memcpy(raw + 1, reversed, sizeof(reversed));
+        } else {
+            memcpy(raw, reversed, sizeof(reversed));
+            raw[8] = 0;
+        }
+        raw[9] = crc8(raw, 9);
+    }
+
+    const auto *payload = reinterpret_cast<const uint8_t *>(&card.sector[0]);
+    // 10th uses the raw reflected result; 9th/RED/HS complement it.
+    const uint16_t whole_crc = crc16_reflected(
+            payload, sizeof(card.sector) + sizeof(card.padding),
+            strcmp(version, "D01") != 0);
+    memcpy(card.checksum, &whole_crc, sizeof(whole_crc));
+    memcpy(out, &card, sizeof(card));
+}
+
+uint8_t keypad_scan_code(uint8_t bit) {
+    static constexpr uint8_t codes[12] = {
+            0x70, // raw 0: 0
+            0x69, // raw 1: 1
+            0x6B, // raw 2: 4
+            0x6C, // raw 3: 7
+            0x70, // raw 4: 00 (use 0)
+            0x72, // raw 5: 2
+            0x73, // raw 6: 5
+            0x75, // raw 7: 8
+            0x00, // raw 8: decimal (unsupported by the reader)
+            0x7A, // raw 9: 3
+            0x74, // raw 10: 6
+            0x7D, // raw 11: 9
+    };
+    return bit < std::size(codes) ? codes[bit] : 0;
+}
 
 uint8_t checksum(const uint8_t *data, uint16_t len) {
     uint8_t sum = 0;
@@ -92,7 +202,7 @@ void poll_slot(uint8_t node) {
         // Lowest set bit index as a simple scan code for the H8 path
         for (uint8_t i = 0; i < 16; i++) {
             if (rise & (1u << i)) {
-                s.keypad_code = static_cast<uint8_t>(0x80 | i);
+                s.keypad_code = keypad_scan_code(i);
                 break;
             }
         }
@@ -166,7 +276,6 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         case NODE_CARD_GET_STATUS:
         case NODE_KEYBOARD_GET_STATUS:
         case NODE_CARD_FORMAT_DONE:
-        case NODE_CARD_WRITE:
             build_status(out, CMD_NODE_RESP, node, in->node_cmd);
             return true;
         case NODE_CARD_RW_STATUS: {
@@ -180,46 +289,55 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         case NODE_CARD_SLOT_STATE: {
             if (slot && in->payload_len >= 1) {
                 const uint8_t state = in->payload[0];
-                if (state == 2 /* eject */ || state == 0 /* close */) {
+                slot->card_slot_state = state;
+                if (state == 2 /* eject */) {
                     slot->card_present = false;
                 }
             }
             build_status(out, CMD_NODE_RESP, node, in->node_cmd);
             return true;
         }
+        case NODE_CARD_WRITE: {
+            if (slot && in_len >= kHdr + 128) {
+                memcpy(slot->write_loopback, in->payload, sizeof(slot->write_loopback));
+                slot->write_loopback_valid = true;
+            }
+            build_status(out, CMD_NODE_RESP, node, in->node_cmd);
+            return true;
+        }
         case NODE_CARD_READ: {
             uint8_t data[1 + 128] {};
-            data[0] = 0; // status
-            if (slot && slot->card_present) {
-                // Mag card layout used by bemanitools: inverted id bytes
-                uint8_t inv[8];
-                for (int i = 0; i < 8; i++) {
-                    inv[i] = static_cast<uint8_t>(~slot->card_id[i]);
-                }
-                memcpy(&data[1], inv, 8);
+            data[0] = 0x48;
+            if (slot && slot->write_loopback_valid) {
+                memcpy(&data[1], slot->write_loopback, sizeof(slot->write_loopback));
+                slot->write_loopback_valid = false;
+            } else if (slot && slot->card_present) {
+                generate_mag_card(&data[1], slot->card_id);
             }
-            build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 129, data, 129);
+            // The driver expects 24 in the field although 129 payload bytes follow.
+            build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 24, data, 129);
             return true;
         }
         case NODE_KEYBOARD_BUF_SIZE: {
             uint8_t payload[2] = {0, 0};
             if (slot && slot->keypad_code != 0) {
-                payload[1] = 1; // size type 1 = one byte ready
+                payload[0] = 1; // little-endian uint16 size type
             }
             build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 2, payload, 2);
             return true;
         }
         case NODE_KEYBOARD_READ: {
             uint8_t size_type = in->payload_len >= 1 ? in->payload[0] : 0;
-            uint8_t payload[2] = {0, 0};
+            uint8_t payload[64] {};
             if (size_type >= 1 && slot && slot->keypad_code != 0) {
-                payload[0] = 0;
-                payload[1] = slot->keypad_code;
+                payload[0] = slot->keypad_code;
                 slot->keypad_code = 0;
-                build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 2, payload, 2);
-            } else {
-                build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 1, payload, 1);
             }
+            static constexpr uint8_t sizes[] = {0, 1, 2, 4, 8, 16, 32, 64};
+            const uint8_t payload_bytes =
+                    size_type < std::size(sizes) ? sizes[size_type] : 0;
+            build_inner(out, CMD_NODE_RESP, node, in->node_cmd,
+                    size_type, payload, payload_bytes);
             return true;
         }
         default:
