@@ -184,7 +184,10 @@ static void ensure_settings_roots() {
     log_info("devicehook", "settings drives d:, e: and f: redirected under .\\");
 }
 
-static const char *remap_settings_path_a(const char *path) {
+static const char *remap_settings_path_a(const char *path, bool *remapped = nullptr) {
+    if (remapped) {
+        *remapped = false;
+    }
     static thread_local std::string storage;
     if (!hooks::device::REMAP_SETTINGS_DRIVES || path == nullptr || path[0] == '\0' || path[1] == '\0') {
         return path;
@@ -197,10 +200,16 @@ static const char *remap_settings_path_a(const char *path) {
     storage = ".\\";
     storage += path;
     rewrite_settings_path(storage);
+    if (remapped) {
+        *remapped = true;
+    }
     return storage.c_str();
 }
 
-static const wchar_t *remap_settings_path_w(const wchar_t *path) {
+static const wchar_t *remap_settings_path_w(const wchar_t *path, bool *remapped = nullptr) {
+    if (remapped) {
+        *remapped = false;
+    }
     static thread_local std::wstring storage;
     if (!hooks::device::REMAP_SETTINGS_DRIVES || path == nullptr || path[0] == L'\0' || path[1] == L'\0') {
         return path;
@@ -213,18 +222,35 @@ static const wchar_t *remap_settings_path_w(const wchar_t *path) {
     storage = L".\\";
     storage += path;
     rewrite_settings_path(storage);
+    if (remapped) {
+        *remapped = true;
+    }
     return storage.c_str();
+}
+
+static void log_settings_remap_fail_a(const char *op, const char *path, DWORD disposition, DWORD err) {
+    log_warning("devicehook", "{} remapped settings path failed: path=\"{}\" disposition={} GetLastError={}",
+            op, path ? path : "(null)", disposition, err);
+}
+
+static void log_settings_remap_fail_w(const char *op, const wchar_t *path, DWORD disposition, DWORD err) {
+    log_warning("devicehook", "{} remapped settings path failed: path=\"{}\" disposition={} GetLastError={}",
+            op, path ? ws2s(path) : "(null)", disposition, err);
 }
 
 static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
                                       LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
                                       DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
     HANDLE result = INVALID_HANDLE_VALUE;
-    lpFileName = remap_settings_path_a(lpFileName);
+    bool remapped = false;
+    lpFileName = remap_settings_path_a(lpFileName, &remapped);
 
     // convert to wide char
     WCHAR lpFileNameW[512] { 0 };
     if (!MultiByteToWideChar(CP_ACP, 0, lpFileName, -1, lpFileNameW, std::size(lpFileNameW))) {
+        if (remapped) {
+            log_settings_remap_fail_a("CreateFileA", lpFileName, dwCreationDisposition, GetLastError());
+        }
         return result;
     }
 
@@ -282,6 +308,9 @@ static HANDLE WINAPI CreateFileA_hook(LPCSTR lpFileName, DWORD dwDesiredAccess, 
     if (result == INVALID_HANDLE_VALUE) {
         result = CreateFileA_orig(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
                                   dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+        if (remapped && result == INVALID_HANDLE_VALUE) {
+            log_settings_remap_fail_a("CreateFileA", lpFileName, dwCreationDisposition, GetLastError());
+        }
     }
 
     // return result
@@ -293,7 +322,8 @@ static HANDLE WINAPI CreateFileW_hook(LPCWSTR lpFileName, DWORD dwDesiredAccess,
                                       DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 {
     HANDLE result = INVALID_HANDLE_VALUE;
-    lpFileName = remap_settings_path_w(lpFileName);
+    bool remapped = false;
+    lpFileName = remap_settings_path_w(lpFileName, &remapped);
 
     // debug
     if (DEVICE_CREATEFILE_DEBUG && lpFileName != nullptr) {
@@ -349,6 +379,9 @@ static HANDLE WINAPI CreateFileW_hook(LPCWSTR lpFileName, DWORD dwDesiredAccess,
     if (result == INVALID_HANDLE_VALUE) {
         result = CreateFileW_orig(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes,
                                   dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+        if (remapped && result == INVALID_HANDLE_VALUE) {
+            log_settings_remap_fail_w("CreateFileW", lpFileName, dwCreationDisposition, GetLastError());
+        }
     }
 
     // return result
@@ -502,21 +535,46 @@ static BOOL WINAPI EscapeCommFunction_hook(HANDLE hFile, DWORD dwFunc) {
 }
 
 static BOOL WINAPI CreateDirectoryA_hook(LPCSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
-    lpPathName = remap_settings_path_a(lpPathName);
-    return CreateDirectoryA_orig(lpPathName, lpSecurityAttributes);
+    bool remapped = false;
+    lpPathName = remap_settings_path_a(lpPathName, &remapped);
+    const BOOL ok = CreateDirectoryA_orig(lpPathName, lpSecurityAttributes);
+    if (remapped && !ok) {
+        const DWORD err = GetLastError();
+        // Existing directory is not a real remapping failure.
+        if (err != ERROR_ALREADY_EXISTS) {
+            log_settings_remap_fail_a("CreateDirectoryA", lpPathName, 0, err);
+        }
+    }
+    return ok;
 }
 
 static BOOL WINAPI CreateDirectoryW_hook(LPCWSTR lpPathName, LPSECURITY_ATTRIBUTES lpSecurityAttributes) {
-    lpPathName = remap_settings_path_w(lpPathName);
-    return CreateDirectoryW_orig(lpPathName, lpSecurityAttributes);
+    bool remapped = false;
+    lpPathName = remap_settings_path_w(lpPathName, &remapped);
+    const BOOL ok = CreateDirectoryW_orig(lpPathName, lpSecurityAttributes);
+    if (remapped && !ok) {
+        const DWORD err = GetLastError();
+        if (err != ERROR_ALREADY_EXISTS) {
+            log_settings_remap_fail_w("CreateDirectoryW", lpPathName, 0, err);
+        }
+    }
+    return ok;
 }
 
 static BOOL WINAPI CopyFileA_hook(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, BOOL bFailIfExists) {
     // remap_settings_path_a reuses one thread_local buffer; copy the first result.
-    const char *existing = remap_settings_path_a(lpExistingFileName);
+    bool remapped_existing = false;
+    bool remapped_new = false;
+    const char *existing = remap_settings_path_a(lpExistingFileName, &remapped_existing);
     const std::string existing_copy = existing ? existing : std::string {};
-    const char *neu = remap_settings_path_a(lpNewFileName);
-    return CopyFileA_orig(existing_copy.c_str(), neu, bFailIfExists);
+    const char *neu = remap_settings_path_a(lpNewFileName, &remapped_new);
+    const BOOL ok = CopyFileA_orig(existing_copy.c_str(), neu, bFailIfExists);
+    if (!ok && (remapped_existing || remapped_new)) {
+        log_warning("devicehook",
+                "CopyFileA remapped settings path failed: src=\"{}\" dst=\"{}\" FailIfExists={} GetLastError={}",
+                existing_copy, neu ? neu : "(null)", bFailIfExists, GetLastError());
+    }
+    return ok;
 }
 
 static BOOL WINAPI FlushFileBuffers_hook(HANDLE hFile) {

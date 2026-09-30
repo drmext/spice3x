@@ -37,6 +37,22 @@ constexpr uint8_t NODE_KEYBOARD_BUF_SIZE = 0x27;
 constexpr uint8_t SERIAL_OK = 0x00;
 constexpr uint8_t SERIAL_FAULT = 0xFE;
 
+constexpr uint8_t SLOT_CLOSE = 0;
+constexpr uint8_t SLOT_OPEN = 1;
+constexpr uint8_t SLOT_EJECT = 2;
+constexpr uint8_t SLOT_FORMAT = 3;
+constexpr uint8_t SLOT_READ = 4;
+constexpr uint8_t SLOT_WRITE = 5;
+
+enum class EmuState : uint8_t {
+    Uninit = 0,
+    Init = 1,
+    Loop = 2,
+    ReqCard = 3,
+    CardRead = 4,
+    Error = 5,
+};
+
 #pragma pack(push, 1)
 struct SerialMsg {
     uint8_t msg_cmd;
@@ -45,30 +61,7 @@ struct SerialMsg {
     uint8_t payload_len;
     uint8_t payload[255];
 };
-#pragma pack(pop)
 
-std::mutex g_mu;
-bool g_read_busy = false;
-bool g_write_busy = false;
-uint8_t g_read_buf[kBuf] {};
-uint8_t g_write_buf[kBuf] {};
-uint16_t g_read_len = 0;
-uint16_t g_write_len = 0;
-uint8_t g_read_page = 0;
-uint8_t g_write_page = 0;
-
-struct Slot {
-    bool card_present = false;
-    uint8_t card_id[8] {};
-    uint8_t keypad_code = 0;
-    uint16_t last_keypad = 0;
-    uint8_t card_slot_state = 0;
-    bool write_loopback_valid = false;
-    uint8_t write_loopback[128] {};
-};
-Slot g_slot[2] {};
-
-#pragma pack(push, 1)
 struct MagCardData {
     struct {
         uint8_t flags;
@@ -84,6 +77,29 @@ struct MagCardData {
     uint8_t checksum[2];
 };
 #pragma pack(pop)
+
+std::mutex g_mu;
+bool g_read_busy = false;
+bool g_write_busy = false;
+uint8_t g_read_buf[kBuf] {};
+uint8_t g_write_buf[kBuf] {};
+uint16_t g_read_len = 0;
+uint16_t g_write_len = 0;
+uint8_t g_read_page = 0;
+uint8_t g_write_page = 0;
+
+struct Slot {
+    EmuState emu = EmuState::Uninit;
+    bool sensor_front = false;
+    bool sensor_back = false;
+    uint8_t card_id[8] {};
+    uint8_t keypad_code = 0;
+    uint16_t last_keypad = 0;
+    uint8_t card_slot_state = SLOT_CLOSE;
+    bool write_loopback_valid = false;
+    uint8_t write_loopback[128] {};
+};
+Slot g_slot[2] {};
 
 uint8_t crc8(const uint8_t *data, size_t len) {
     uint8_t crc = 0xFF;
@@ -156,19 +172,20 @@ void generate_mag_card(uint8_t *out, const uint8_t card_id[8]) {
 }
 
 uint8_t keypad_scan_code(uint8_t bit) {
+    // bemanitools eamio_mapping order: 0 1 4 7 O 2 5 8 E 3 6 9
     static constexpr uint8_t codes[12] = {
-            0x70, // raw 0: 0
-            0x69, // raw 1: 1
-            0x6B, // raw 2: 4
-            0x6C, // raw 3: 7
-            0x70, // raw 4: 00 (use 0)
-            0x72, // raw 5: 2
-            0x73, // raw 6: 5
-            0x75, // raw 7: 8
-            0x00, // raw 8: decimal (unsupported by the reader)
-            0x7A, // raw 9: 3
-            0x74, // raw 10: 6
-            0x7D, // raw 11: 9
+            0x70, // 0
+            0x69, // 1
+            0x6B, // 4
+            0x6C, // 7
+            0x70, // 00 -> 0
+            0x72, // 2
+            0x73, // 5
+            0x75, // 8
+            0x66, // backspace / E
+            0x7A, // 3
+            0x74, // 6
+            0x7D, // 9
     };
     return bit < std::size(codes) ? codes[bit] : 0;
 }
@@ -181,6 +198,41 @@ uint8_t checksum(const uint8_t *data, uint16_t len) {
     return sum;
 }
 
+void clear_card(Slot &s) {
+    memset(s.card_id, 0, sizeof(s.card_id));
+    s.sensor_front = false;
+    s.sensor_back = false;
+}
+
+bool card_id_valid(const uint8_t id[8]) {
+    for (int i = 0; i < 8; i++) {
+        if (id[i] != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void try_read_card(Slot &s, size_t unit) {
+    if (s.emu != EmuState::ReqCard) {
+        return;
+    }
+    // Prefer an id already captured while the slot was OPEN; otherwise poll eamuse.
+    if (!card_id_valid(s.card_id)) {
+        eamuse_get_card(2, static_cast<int>(unit), s.card_id);
+    }
+    if (card_id_valid(s.card_id)) {
+        s.sensor_front = true;
+        s.sensor_back = true;
+        s.emu = EmuState::CardRead;
+        log_info("iidx::serial", "node {} card read ok", unit + 1);
+    } else {
+        clear_card(s);
+        s.emu = EmuState::Error;
+        log_warning("iidx::serial", "node {} card read failed", unit + 1);
+    }
+}
+
 void poll_slot(uint8_t node) {
     if (node < 1 || node > 2) {
         return;
@@ -188,29 +240,37 @@ void poll_slot(uint8_t node) {
     Slot &s = g_slot[node - 1];
     const size_t unit = node - 1;
 
-    // Card insert edge from spice overlay / file
-    if (eamuse_card_insert_consume(2, static_cast<int>(unit))) {
+    // Accept overlay/file inserts only while the slot is open.
+    if (s.card_slot_state == SLOT_OPEN
+            && eamuse_card_insert_consume(2, static_cast<int>(unit))) {
         if (eamuse_get_card(2, static_cast<int>(unit), s.card_id)) {
-            s.card_present = true;
+            s.sensor_front = true;
+            s.sensor_back = true;
+            log_info("iidx::serial", "node {} card inserted (slot open)", node);
         }
     }
 
+    // Complete a pending READ request without a background thread.
+    if (s.card_slot_state == SLOT_READ) {
+        try_read_card(s, unit);
+    }
+
     const uint16_t kp = eamuse_get_keypad_state(unit);
-    const uint16_t rise = kp & (s.last_keypad ^ kp);
+    const uint16_t rise = kp & static_cast<uint16_t>(~s.last_keypad);
     s.last_keypad = kp;
-    if (rise) {
-        // Lowest set bit index as a simple scan code for the H8 path
-        for (uint8_t i = 0; i < 16; i++) {
+    if (rise && s.keypad_code == 0) {
+        for (uint8_t i = 0; i < 12; i++) {
             if (rise & (1u << i)) {
-                s.keypad_code = keypad_scan_code(i);
+                const uint8_t code = keypad_scan_code(i);
+                if (code != 0) {
+                    s.keypad_code = code;
+                }
                 break;
             }
         }
     }
 }
 
-// Inner SerialMsg only (no 0xAA frame, no trailing checksum).
-// payload_bytes may exceed payload_len_field (GET_VERSION quirk in ezusb).
 void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
         uint8_t node_cmd, uint8_t payload_len_field,
         const uint8_t *payload, uint8_t payload_bytes) {
@@ -225,9 +285,8 @@ void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
 }
 
 void build_status(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
-        uint8_t node_cmd) {
-    const uint8_t st = 0;
-    build_inner(out, msg_cmd, node_id, node_cmd, 1, &st, 1);
+        uint8_t node_cmd, uint8_t status = 0) {
+    build_inner(out, msg_cmd, node_id, node_cmd, 1, &status, 1);
 }
 
 bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out) {
@@ -238,23 +297,39 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
     if (in->msg_cmd == CMD_H8_REQ) {
         if (in->node_cmd == H8_NODE_ENUM) {
             const uint8_t total = 2;
+            log_misc("iidx::serial", "H8_NODE_ENUM");
             build_inner(out, CMD_H8_RESP, 0, in->node_cmd, 1, &total, 1);
             return true;
         }
         if (in->node_cmd == H8_GET_VERSION) {
-            // payload_len field is 5, but the body is the full 13-byte struct
-            // (uint32 type, dup, maj/min/rev, comment[5]) — bemanitools match.
+            // payload_len field is 5, but the body is the full 13-byte struct.
             uint8_t ver[13] = {
                     0x03, 0x00, 0x00, 0x00,
                     0x00,
                     1, 6, 0,
                     'I', 'C', 'C', 'A', 0,
             };
+            log_misc("iidx::serial", "H8_GET_VERSION node {}", in->node_id);
             build_inner(out, CMD_H8_RESP, in->node_id, in->node_cmd, 5, ver, 13);
             return true;
         }
         if (in->node_cmd == H8_PROG_EXEC) {
-            build_status(out, CMD_H8_RESP, in->node_id, in->node_cmd);
+            uint8_t status = 0;
+            if (in->node_id >= 1 && in->node_id <= 2) {
+                Slot &s = g_slot[in->node_id - 1];
+                if (s.emu == EmuState::Uninit) {
+                    // bemanitools waits for a thread INIT->LOOP; do it inline.
+                    s.emu = EmuState::Loop;
+                    log_info("iidx::serial", "H8_PROG_EXEC node {} -> LOOP", in->node_id);
+                } else if (s.emu == EmuState::Error) {
+                    status = 0xFF;
+                    log_warning("iidx::serial", "H8_PROG_EXEC node {} in ERROR", in->node_id);
+                } else {
+                    log_misc("iidx::serial", "H8_PROG_EXEC node {} ok (state {})",
+                            in->node_id, static_cast<int>(s.emu));
+                }
+            }
+            build_status(out, CMD_H8_RESP, in->node_id, in->node_cmd, status);
             return true;
         }
         log_warning("iidx::serial", "unknown H8 cmd {:02x}", in->node_cmd);
@@ -272,7 +347,13 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
 
     switch (in->node_cmd) {
         case NODE_CARD_INIT:
+            log_misc("iidx::serial", "CARD_INIT node {}", node);
+            build_status(out, CMD_NODE_RESP, node, in->node_cmd);
+            return true;
         case NODE_KEYBOARD_INIT:
+            log_misc("iidx::serial", "KEYBOARD_INIT node {}", node);
+            build_status(out, CMD_NODE_RESP, node, in->node_cmd);
+            return true;
         case NODE_CARD_GET_STATUS:
         case NODE_KEYBOARD_GET_STATUS:
         case NODE_CARD_FORMAT_DONE:
@@ -280,8 +361,17 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
             return true;
         case NODE_CARD_RW_STATUS: {
             uint8_t st = 0;
-            if (slot && slot->card_present) {
-                st = static_cast<uint8_t>(128 | 2); // back sensor + present
+            if (slot) {
+                if (slot->emu == EmuState::Error) {
+                    st = 0xFF;
+                } else {
+                    if (slot->sensor_back) {
+                        st = static_cast<uint8_t>(st | 128 | 2);
+                    }
+                    if (slot->sensor_front) {
+                        st = static_cast<uint8_t>(st | 64 | 2);
+                    }
+                }
             }
             build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 1, &st, 1);
             return true;
@@ -290,8 +380,36 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
             if (slot && in->payload_len >= 1) {
                 const uint8_t state = in->payload[0];
                 slot->card_slot_state = state;
-                if (state == 2 /* eject */) {
-                    slot->card_present = false;
+                switch (state) {
+                    case SLOT_CLOSE:
+                        log_misc("iidx::serial", "SLOT_CLOSE node {}", node);
+                        break;
+                    case SLOT_OPEN:
+                        log_misc("iidx::serial", "SLOT_OPEN node {}", node);
+                        break;
+                    case SLOT_EJECT:
+                        log_info("iidx::serial", "SLOT_EJECT node {}", node);
+                        clear_card(*slot);
+                        if (slot->emu == EmuState::Error || slot->emu == EmuState::CardRead
+                                || slot->emu == EmuState::ReqCard) {
+                            slot->emu = EmuState::Loop;
+                        }
+                        break;
+                    case SLOT_FORMAT:
+                        log_misc("iidx::serial", "SLOT_FORMAT node {}", node);
+                        break;
+                    case SLOT_READ:
+                        log_misc("iidx::serial", "SLOT_READ node {}", node);
+                        slot->emu = EmuState::ReqCard;
+                        try_read_card(*slot, node - 1);
+                        break;
+                    case SLOT_WRITE:
+                        log_misc("iidx::serial", "SLOT_WRITE node {}", node);
+                        break;
+                    default:
+                        log_warning("iidx::serial", "invalid slot state {} node {}",
+                                state, node);
+                        break;
                 }
             }
             build_status(out, CMD_NODE_RESP, node, in->node_cmd);
@@ -301,6 +419,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
             if (slot && in_len >= kHdr + 128) {
                 memcpy(slot->write_loopback, in->payload, sizeof(slot->write_loopback));
                 slot->write_loopback_valid = true;
+                log_misc("iidx::serial", "CARD_WRITE node {} (loopback cached)", node);
             }
             build_status(out, CMD_NODE_RESP, node, in->node_cmd);
             return true;
@@ -308,14 +427,35 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         case NODE_CARD_READ: {
             uint8_t data[1 + 128] {};
             data[0] = 0x48;
+            uint8_t payload_len_field = 24;
+            uint8_t payload_bytes = 129;
+
             if (slot && slot->write_loopback_valid) {
                 memcpy(&data[1], slot->write_loopback, sizeof(slot->write_loopback));
                 slot->write_loopback_valid = false;
-            } else if (slot && slot->card_present) {
-                generate_mag_card(&data[1], slot->card_id);
+                log_misc("iidx::serial", "CARD_READ node {} loopback", node);
+            } else if (slot) {
+                // Finish a pending read inline if the game asks before poll ran.
+                if (slot->emu == EmuState::ReqCard) {
+                    try_read_card(*slot, node - 1);
+                }
+                if (slot->emu == EmuState::CardRead && card_id_valid(slot->card_id)) {
+                    generate_mag_card(&data[1], slot->card_id);
+                    slot->emu = EmuState::Loop;
+                    log_misc("iidx::serial", "CARD_READ node {} mag payload", node);
+                } else if (slot->emu == EmuState::Error) {
+                    // bemanitools still sends the full 129-byte body; payload_len=1
+                    // and data[0]=0xFF indicate the read failure to the driver.
+                    payload_len_field = 1;
+                    data[1] = 0xFF;
+                    log_warning("iidx::serial", "CARD_READ node {} error status", node);
+                } else {
+                    // Empty slot: return blank mag blob with the usual header.
+                    log_misc("iidx::serial", "CARD_READ node {} empty", node);
+                }
             }
-            // The driver expects 24 in the field although 129 payload bytes follow.
-            build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 24, data, 129);
+            build_inner(out, CMD_NODE_RESP, node, in->node_cmd,
+                    payload_len_field, data, payload_bytes);
             return true;
         }
         case NODE_KEYBOARD_BUF_SIZE: {
@@ -342,8 +482,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         }
         default:
             log_warning("iidx::serial", "unknown node cmd {:02x}", in->node_cmd);
-            build_status(out, CMD_NODE_RESP, node, in->node_cmd);
-            return true;
+            return false;
     }
 }
 
@@ -438,6 +577,7 @@ void init() {
     memset(g_write_buf, 0, sizeof(g_write_buf));
     g_slot[0] = {};
     g_slot[1] = {};
+    log_info("iidx::serial", "magnetic reader emulation initialized");
 }
 
 uint8_t process_cmd(uint8_t cmd) {
@@ -467,12 +607,12 @@ uint8_t process_cmd(uint8_t cmd) {
     }
 }
 
-bool read_packet(uint8_t *pkg60) {
+bool read_packet(uint8_t *packet) {
     std::lock_guard lock(g_mu);
     // BulkPacket: node, page, payload[62]
-    pkg60[0] = 0x42;
-    pkg60[1] = g_read_page;
-    memset(pkg60 + 2, 0xFF, kPage);
+    packet[0] = 0x42;
+    packet[1] = g_read_page;
+    memset(packet + 2, 0xFF, kPage);
 
     const uint16_t offset = static_cast<uint16_t>(g_read_page * kPage);
     uint16_t data_length = 0;
@@ -482,19 +622,19 @@ bool read_packet(uint8_t *pkg60) {
         g_read_page++;
     } else {
         data_length = g_read_len;
-        pkg60[1] = static_cast<uint8_t>(0x40 + data_length);
+        packet[1] = static_cast<uint8_t>(0x40 + data_length);
         g_read_len = 0;
     }
     if (data_length) {
-        memcpy(pkg60 + 2, g_read_buf + offset, data_length);
+        memcpy(packet + 2, g_read_buf + offset, data_length);
     }
     return true;
 }
 
-bool write_packet(const uint8_t *pkg60) {
+bool write_packet(const uint8_t *packet) {
     std::lock_guard lock(g_mu);
-    const uint8_t page = pkg60[1];
-    const uint8_t *payload = pkg60 + 2;
+    const uint8_t page = packet[1];
+    const uint8_t *payload = packet + 2;
     bool execute = false;
     uint16_t data_length = 0;
     const uint16_t offset = static_cast<uint16_t>(g_write_page * kPage);
@@ -517,6 +657,7 @@ bool write_packet(const uint8_t *pkg60) {
     if (execute) {
         exec_write_buf();
         g_write_page = 0;
+        g_write_len = 0;
     }
     return true;
 }

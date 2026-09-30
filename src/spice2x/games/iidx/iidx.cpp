@@ -334,19 +334,30 @@ namespace games::iidx {
     }
 
     // RtEffect analog EQ stubs (bemanitools effector.c). Real audio is DirectSound.
-    static BOOL WINAPI EnableEqualizer_hook(int) { return TRUE; }
-    static BOOL WINAPI GetEqualizerStatus_hook(LPVOID) { return TRUE; }
-    static BOOL WINAPI SetEqualizerGain_hook(int, int) { return TRUE; }
-    static BOOL WINAPI SetGlobalEnvironment_hook(int) { return TRUE; }
-    static BOOL WINAPI SetSpeakerMode_hook(int, int) { return TRUE; }
+    // The game imports these as cdecl and cleans the stack after the call (add esp, N).
+    // WINAPI/stdcall stubs would double-clean and corrupt the return address (EIP 0).
+    static BOOL __cdecl EnableEqualizer_hook(int) { return TRUE; }
+    static BOOL __cdecl GetEqualizerStatus_hook(LPVOID) { return TRUE; }
+    static BOOL __cdecl SetEqualizerGain_hook(int, int) { return TRUE; }
+    static BOOL __cdecl SetGlobalEnvironment_hook(int) { return TRUE; }
+    static BOOL __cdecl SetSpeakerMode_hook(int, int) { return TRUE; }
 
     static void stub_rteffect(HMODULE module) {
-        detour::iat_try("EnableEqualizer", EnableEqualizer_hook, module);
-        detour::iat_try("GetEqualizerStatus", GetEqualizerStatus_hook, module);
-        detour::iat_try("SetEqualizerGain", SetEqualizerGain_hook, module);
-        detour::iat_try("SetGlobalEnvironment", SetGlobalEnvironment_hook, module);
-        detour::iat_try("SetSpeakerMode", SetSpeakerMode_hook, module);
-        log_info("iidx", "RtEffect equalizer exports stubbed");
+        const bool ok_enable =
+                detour::iat_try("EnableEqualizer", EnableEqualizer_hook, module) != nullptr;
+        const bool ok_status =
+                detour::iat_try("GetEqualizerStatus", GetEqualizerStatus_hook, module) != nullptr;
+        const bool ok_gain =
+                detour::iat_try("SetEqualizerGain", SetEqualizerGain_hook, module) != nullptr;
+        const bool ok_env =
+                detour::iat_try("SetGlobalEnvironment", SetGlobalEnvironment_hook, module) != nullptr;
+        const bool ok_speaker =
+                detour::iat_try("SetSpeakerMode", SetSpeakerMode_hook, module) != nullptr;
+        log_info("iidx",
+                "RtEffect stubs: EnableEqualizer={} GetEqualizerStatus={} "
+                "SetEqualizerGain={} SetGlobalEnvironment={} SetSpeakerMode={}",
+                ok_enable ? 1 : 0, ok_status ? 1 : 0, ok_gain ? 1 : 0,
+                ok_env ? 1 : 0, ok_speaker ? 1 : 0);
     }
 
     // Operator menu clock save must not change the Windows clock (iidxhook clock.c).
