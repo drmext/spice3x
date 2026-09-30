@@ -696,8 +696,6 @@ bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
             return true;
         case NODE_FPGA_V2_OR_SERIAL:
             if (is_serial_board()) {
-                log_misc("iidx::ezusb2", "serial node cmd={:02x} d0={:02x} d1={:02x}",
-                        cmd, d0, d1);
                 g_status = ezusb_serial::process_cmd(cmd);
                 return true;
             }
@@ -962,11 +960,7 @@ bool bulk_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
             if (is_serial_board() && pkg.node == NODE_FPGA_V2_OR_SERIAL) {
                 return ezusb_serial::write_packet(reinterpret_cast<const uint8_t *>(&pkg));
             }
-            if (is_serial_board()) {
-                log_misc("iidx::ezusb2",
-                        "serial-era bulk write discarded node={:02x}", pkg.node);
-            }
-            // accept and discard FPGA firmware / wdt pages
+            // accept and discard FPGA firmware / wdt / other serial-era pages
             return true;
         default:
             log_warning("iidx::ezusb2", "bulk write unsupported on node {:02x}", pkg.node);

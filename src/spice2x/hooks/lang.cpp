@@ -7,6 +7,7 @@
 #include <windows.h>
 #undef WIN32_NO_STATUS
 
+#include <intrin.h>
 #include <winternl.h>
 #include <ntstatus.h>
 
@@ -31,6 +32,8 @@ static decltype(WideCharToMultiByte) *WideCharToMultiByte_orig = nullptr;
 static decltype(GetLocaleInfoEx) *GetLocaleInfoEx_orig = nullptr;
 static decltype(IsDBCSLeadByte) *IsDBCSLeadByte_orig = nullptr;
 static decltype(IsDBCSLeadByteEx) *IsDBCSLeadByteEx_orig = nullptr;
+static decltype(CreateFontA) *CreateFontA_orig = nullptr;
+static decltype(CreateFontIndirectA) *CreateFontIndirectA_orig = nullptr;
 #ifdef SPICE64
 static decltype(GetLocaleInfoA) *GetLocaleInfoA_orig = nullptr;
 #endif
@@ -43,6 +46,32 @@ static decltype(GetThreadLocale) *GetThreadLocale_orig = nullptr;
 // MinHook needs an orig slot even when the hook does not call through.
 static void *RtlMultiByteToUnicodeN_orig = nullptr;
 
+// eam3lib XML (C02) must keep the host ACP; GDI/bm2dx need Shift-JIS.
+// ret_addr must be the hook's _ReturnAddress() (the external caller).
+static bool module_is_eam3(const void *ret_addr) {
+    if (!ret_addr) {
+        return false;
+    }
+    HMODULE caller = nullptr;
+    if (!GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCSTR>(ret_addr),
+            &caller)
+            || !caller) {
+        return false;
+    }
+    static HMODULE eam3 = nullptr;
+    static HMODULE eam3mod = nullptr;
+    if (!eam3) {
+        eam3 = GetModuleHandleA("eam3lib.dll");
+    }
+    if (!eam3mod) {
+        eam3mod = GetModuleHandleA("eam3mod.dll");
+    }
+    return caller == eam3 || caller == eam3mod;
+}
+
 static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
         PWCH UnicodeString,
         ULONG MaxBytesInUnicodeString,
@@ -50,6 +79,16 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
         const CHAR *MultiByteString,
         ULONG BytesInMultiByteString)
 {
+    if (module_is_eam3(_ReturnAddress()) && RtlMultiByteToUnicodeN_orig) {
+        using fn_t = NTSTATUS (NTAPI *)(PWCH, ULONG, PULONG, const CHAR *, ULONG);
+        return reinterpret_cast<fn_t>(RtlMultiByteToUnicodeN_orig)(
+                UnicodeString,
+                MaxBytesInUnicodeString,
+                BytesInUnicodeString,
+                MultiByteString,
+                BytesInMultiByteString);
+    }
+
     // MaxBytesInUnicodeString is bytes; MultiByteToWideChar wants wchar count.
     const int cch_wide = static_cast<int>(MaxBytesInUnicodeString / sizeof(WCHAR));
 
@@ -93,10 +132,16 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
 }
 
 static UINT WINAPI GetACP_hook() {
+    if (module_is_eam3(_ReturnAddress()) && GetACP_orig) {
+        return GetACP_orig();
+    }
     return CODEPAGE_SHIFT_JIS;
 }
 
 static UINT WINAPI GetOEMCP_hook() {
+    if (module_is_eam3(_ReturnAddress()) && GetOEMCP_orig) {
+        return GetOEMCP_orig();
+    }
     return CODEPAGE_SHIFT_JIS;
 }
 
@@ -104,6 +149,9 @@ static UINT WINAPI GetOEMCP_hook() {
 // and LeadByte ranges. On a Western host that still returns SBCS info while GetACP
 // says 932 → fullwidth colon (SJIS 8146) drawn as two overlapping glyphs.
 static BOOL WINAPI GetCPInfo_hook(UINT CodePage, LPCPINFO lpCPInfo) {
+    if (module_is_eam3(_ReturnAddress()) && GetCPInfo_orig) {
+        return GetCPInfo_orig(CodePage, lpCPInfo);
+    }
     switch (CodePage) {
         case CP_ACP:
         case CP_OEMCP:
@@ -114,6 +162,30 @@ static BOOL WINAPI GetCPInfo_hook(UINT CodePage, LPCPINFO lpCPInfo) {
             break;
     }
     return GetCPInfo_orig(CodePage, lpCPInfo);
+}
+
+static HFONT WINAPI CreateFontA_hook(
+        int cHeight, int cWidth, int cEscapement, int cOrientation, int cWeight,
+        DWORD bItalic, DWORD bUnderline, DWORD bStrikeOut, DWORD iCharSet,
+        DWORD iOutPrecision, DWORD iClipPrecision, DWORD iQuality,
+        DWORD iPitchAndFamily, LPCSTR pszFaceName)
+{
+    if (iCharSet == DEFAULT_CHARSET || iCharSet == ANSI_CHARSET) {
+        iCharSet = SHIFTJIS_CHARSET;
+    }
+    return CreateFontA_orig(
+            cHeight, cWidth, cEscapement, cOrientation, cWeight,
+            bItalic, bUnderline, bStrikeOut, iCharSet,
+            iOutPrecision, iClipPrecision, iQuality,
+            iPitchAndFamily, pszFaceName);
+}
+
+static HFONT WINAPI CreateFontIndirectA_hook(const LOGFONTA *lplf) {
+    LOGFONTA lf = *lplf;
+    if (lf.lfCharSet == DEFAULT_CHARSET || lf.lfCharSet == ANSI_CHARSET) {
+        lf.lfCharSet = SHIFTJIS_CHARSET;
+    }
+    return CreateFontIndirectA_orig(&lf);
 }
 
 #ifdef SPICE64
@@ -207,6 +279,14 @@ static BOOL WINAPI IsDBCSLeadByte_hook (
     BYTE TestChar
     )
 {
+    if (module_is_eam3(_ReturnAddress())) {
+        if (IsDBCSLeadByte_orig) {
+            return IsDBCSLeadByte_orig(TestChar);
+        }
+        if (IsDBCSLeadByteEx_orig) {
+            return IsDBCSLeadByteEx_orig(CP_ACP, TestChar);
+        }
+    }
     if (IsDBCSLeadByteEx_orig) {
         return IsDBCSLeadByteEx_orig(CODEPAGE_SHIFT_JIS, TestChar);
     }
@@ -218,6 +298,9 @@ static BOOL WINAPI IsDBCSLeadByteEx_hook(
     UINT CodePage,
     BYTE TestChar)
 {
+    if (module_is_eam3(_ReturnAddress())) {
+        return IsDBCSLeadByteEx_orig(CodePage, TestChar);
+    }
     switch (CodePage) {
         case CP_ACP:
         case CP_THREAD_ACP:
@@ -448,6 +531,25 @@ void hooks::lang::early_init() {
                         &RtlMultiByteToUnicodeN_orig)) {
                 log_info("hooks::lang",
                         "RtlMultiByteToUnicodeN trampoline installed for legacy IIDX");
+            }
+
+            // Force SHIFTJIS_CHARSET so ExtTextOutA picks a CJK face on Western hosts.
+            if (detour::trampoline_try(
+                        "gdi32.dll",
+                        "CreateFontA",
+                        CreateFontA_hook,
+                        &CreateFontA_orig)
+                    && CreateFontA_orig) {
+                log_info("hooks::lang", "CreateFontA trampoline installed for legacy IIDX");
+            }
+            if (detour::trampoline_try(
+                        "gdi32.dll",
+                        "CreateFontIndirectA",
+                        CreateFontIndirectA_hook,
+                        &CreateFontIndirectA_orig)
+                    && CreateFontIndirectA_orig) {
+                log_info("hooks::lang",
+                        "CreateFontIndirectA trampoline installed for legacy IIDX");
             }
         }
     }

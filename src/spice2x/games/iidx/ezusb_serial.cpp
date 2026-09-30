@@ -114,6 +114,8 @@ void poll_keypad_locked(uint8_t node) {
     }
     Slot &s = g_slot[node - 1];
     const size_t unit = node - 1;
+    // Sample eamio without holding g_mu — GameAPI/rawinput can block and the
+    // serial ioctl path also takes g_mu (keypad "lockups" in test menu).
     const uint16_t kp = eamuse_get_keypad_state(unit);
     const uint16_t rise = kp & static_cast<uint16_t>(~s.last_keypad);
     s.last_keypad = kp;
@@ -136,11 +138,11 @@ void poll_thread_main() {
     // bemanitools node-serial emu thread: sample eamio ~100Hz so brief keypad
     // presses are not missed between rare KEYBOARD_* serial commands.
     while (g_poll_run.load(std::memory_order_relaxed)) {
-        {
-            std::lock_guard lock(g_mu);
-            poll_keypad_locked(1);
-            poll_keypad_locked(2);
-        }
+        // Intentionally no g_mu here; poll_keypad_locked only touches per-slot
+        // keypad fields that serial KEYBOARD_READ also uses. A torn read of
+        // keypad_code is acceptable (0 or a scan code).
+        poll_keypad_locked(1);
+        poll_keypad_locked(2);
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
@@ -299,9 +301,8 @@ void poll_slot(uint8_t node) {
         try_read_card(s, unit);
     }
 
-    // Keypad is sampled on the poll thread; keep a pass here so serial-only
-    // paths still work if the thread is not running yet.
-    poll_keypad_locked(node);
+    // Keypad is sampled on the poll thread (no g_mu) so serial KEYBOARD_*
+    // commands under g_mu never block on GameAPI/rawinput.
 }
 
 void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
@@ -544,7 +545,6 @@ void exec_write_buf() {
     // that is four bytes starting with 0xAA, unchanged.
     if (g_write_buf[0] == 0x00
             || (g_write_len == 4 && g_write_buf[0] == HEADER_BYTE)) {
-        log_misc("iidx::serial", "uart echo (trash/init) len={}", g_write_len);
         set_read_buf(g_write_buf, g_write_len);
         return;
     }
@@ -573,7 +573,6 @@ void exec_write_buf() {
     if (msg_len == 2 && msg_buf[0] == HEADER_BYTE && msg_buf[1] == HEADER_BYTE) {
         uint8_t frame[4] = {HEADER_BYTE, HEADER_BYTE, HEADER_BYTE, 0};
         frame[3] = checksum(frame + 1, 2);
-        log_misc("iidx::serial", "uart reset AA AA echo");
         set_read_buf(frame, 4);
         return;
     }
@@ -602,8 +601,6 @@ void exec_write_buf() {
         frame.push_back(checksum(inner.data(), static_cast<uint16_t>(inner.size())));
     }
 
-    log_misc("iidx::serial", "reply msg={:02x} node={} cmd={:02x} out={}",
-            msg->msg_cmd, msg->node_id, msg->node_cmd, frame.size());
     set_read_buf(frame.data(), frame.size());
 }
 
@@ -648,7 +645,6 @@ void init() {
 
 uint8_t process_cmd(uint8_t cmd) {
     std::lock_guard lock(g_mu);
-    log_misc("iidx::serial", "process_cmd {:02x} read_len={}", cmd, g_read_len);
     switch (cmd) {
         case 0x02: // READ_BUFFER
             g_read_busy = false;
@@ -720,7 +716,6 @@ bool write_packet(const uint8_t *packet) {
     g_write_len = static_cast<uint16_t>(g_write_len + data_length);
 
     if (execute) {
-        log_misc("iidx::serial", "serial write exec page={:02x} len={}", page, g_write_len);
         exec_write_buf();
         // bemanitools only clears write_buf_data_len here; WRITE_BUFFER /
         // CLEAR_WRITE reset the page. Keep page sticky across execute.
