@@ -1083,7 +1083,7 @@ int main_implementation(int argc, char *argv[]) {
         sde_init(options[launcher::Options::IntelSDEFolder].value_text());
     }
     if (options[launcher::Options::AdapterNetwork].is_active()) {
-        NETWORK_ADDRESS = options[launcher::Options::AdapterNetwork].value_text();
+        NETWORK_ADDR = options[launcher::Options::AdapterNetwork].value_text();
     }
     if (options[launcher::Options::AdapterSubnet].is_active()) {
         NETWORK_SUBNET = options[launcher::Options::AdapterSubnet].value_text();

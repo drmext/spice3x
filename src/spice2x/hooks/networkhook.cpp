@@ -32,7 +32,7 @@ static uint16_t legacy_eamuse_port = 80; // host byte order
 static bool legacy_eamuse_enabled = false;
 
 // settings
-std::string NETWORK_ADDRESS = "10.9.0.0";
+std::string NETWORK_ADDR = "10.9.0.0";
 std::string NETWORK_SUBNET = "255.255.0.0";
 static bool GetAdaptersInfo_log = true;
 static bool GetIpAddrTable_log = true;
@@ -554,7 +554,7 @@ void networkhook_init() {
     install_legacy_eamuse_hooks();
 
     // set some same defaults
-    network.s_addr = inet_addr(NETWORK_ADDRESS.c_str());
+    network.s_addr = inet_addr(NETWORK_ADDR.c_str());
     subnet.s_addr = inet_addr(NETWORK_SUBNET.c_str());
     prefix.s_addr = network.s_addr & subnet.s_addr;
 
