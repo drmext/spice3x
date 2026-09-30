@@ -28,8 +28,9 @@ static decltype(GetOEMCP) *GetOEMCP_orig = nullptr;
 static decltype(MultiByteToWideChar) *MultiByteToWideChar_orig = nullptr;
 static decltype(WideCharToMultiByte) *WideCharToMultiByte_orig = nullptr;
 static decltype(GetLocaleInfoEx) *GetLocaleInfoEx_orig = nullptr;
+#ifdef SPICE64
 static decltype(GetLocaleInfoA) *GetLocaleInfoA_orig = nullptr;
-static decltype(GetLocaleInfoW) *GetLocaleInfoW_orig = nullptr;
+#endif
 
 #ifdef SPICE64
 static decltype(GetSystemDefaultLCID) *GetSystemDefaultLCID_orig = nullptr;
@@ -247,6 +248,7 @@ WideCharToMultiByte_hook(
         lpUsedDefaultChar);
 }
 
+#ifdef SPICE64
 static int WINAPI GetLocaleInfoA_hook(
     LCID Locale,
     LCTYPE LCType,
@@ -269,28 +271,7 @@ static int WINAPI GetLocaleInfoA_hook(
     log_misc("hooks::lang", "GetLocaleInfoA_hook hit, {:#x}, {:#x}", Locale, LCType);
     return GetLocaleInfoA_orig(Locale, LCType, lpLCData, cchData);
 }
-
-static int WINAPI GetLocaleInfoW_hook(
-    LCID Locale,
-    LCTYPE LCType,
-    LPWSTR lpLCData,
-    int cchData) {
-
-    if (LCType == LOCALE_SISO639LANGNAME && lpLCData != NULL && cchData >= 3) {
-        log_misc("hooks::lang", "GetLocaleInfoW_hook hit ({:#x}, LOCALE_SISO639LANGNAME), return `ja`", Locale);
-        wcscpy(lpLCData, L"ja");
-        return 3;
-    }
-
-    if (LCType == LOCALE_SISO3166CTRYNAME && lpLCData != NULL && cchData >= 3) {
-        log_misc("hooks::lang",
-                 "GetLocaleInfoW_hook hit ({:#x}, LOCALE_SISO3166CTRYNAME), return `JP`", Locale);
-        wcscpy(lpLCData, L"JP");
-        return 3;
-    }
-
-    return GetLocaleInfoW_orig(Locale, LCType, lpLCData, cchData);
-}
+#endif
 
 void hooks::lang::early_init() {
     log_info("hooks::lang", "early initialization");
