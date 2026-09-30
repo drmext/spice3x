@@ -446,20 +446,35 @@ bool detour::trampoline(void *func, void *hook, void **orig) {
 bool detour::trampoline_try(const char *dll, const char *func, void *hook, void **orig) {
     minhook_init();
     auto dll_w = s2ws(dll);
-    auto target = *orig;
-    auto create = MH_CreateHookApi(dll_w.c_str(), func, hook, orig);
-    if (create != MH_OK) {
-        // log_warning("detour", "MH_CreateHookApi({}, {}): {}", dll, func, MH_StatusToString(create));
+
+    // MH_CreateHookApi only GetModuleHandle's — fail if the DLL is not mapped yet
+    // (common early in injected IIDX 9-13 before iphlpapi/ws2_32 are touched).
+    HMODULE module = GetModuleHandleW(dll_w.c_str());
+    if (!module) {
+        module = LoadLibraryW(dll_w.c_str());
+    }
+    if (!module) {
         return false;
     }
-    return !(MH_EnableHook(target) != MH_OK);
+
+    void *target = reinterpret_cast<void *>(GetProcAddress(module, func));
+    if (!target) {
+        return false;
+    }
+
+    if (MH_CreateHook(target, hook, orig) != MH_OK) {
+        return false;
+    }
+    return MH_EnableHook(target) == MH_OK;
 }
 
 bool detour::trampoline_try(void *func, void *hook, void **orig) {
     minhook_init();
-    auto target = *orig;
+    if (!func) {
+        return false;
+    }
     if (MH_CreateHook(func, hook, orig) != MH_OK) {
         return false;
     }
-    return !(MH_EnableHook(target) != MH_OK);
+    return MH_EnableHook(func) == MH_OK;
 }

@@ -354,6 +354,42 @@ void hooks::lang::early_init() {
             "IsDBCSLeadByteEx",
             IsDBCSLeadByteEx_hook,
             &IsDBCSLeadByteEx_orig);
+
+        // GDI text extent converts via kernel32/kernelbase ACP paths. IAT-only
+        // MB2WC is not enough for IIDX 9-13 (often GetProcAddress / delay-load /
+        // gdi32 → kernelbase), which causes colon overlap on status lines.
+        if (avs::game::is_model({ "C02", "D01", "E11", "ECO", "FDD" })) {
+            // Hook kernelbase first (real body on Win10+); then kernel32 (stub or
+            // older OS). Prefer the kernelbase trampoline as orig so a hooked
+            // kernel32 stub that jmps into kernelbase cannot re-enter our hook.
+            decltype(MultiByteToWideChar) *orig_kb = nullptr;
+            decltype(MultiByteToWideChar) *orig_k32 = nullptr;
+            const bool kb = detour::trampoline_try(
+                "kernelbase.dll",
+                "MultiByteToWideChar",
+                MultiByteToWideChar_hook,
+                &orig_kb);
+            const bool k32 = detour::trampoline_try(
+                "kernel32.dll",
+                "MultiByteToWideChar",
+                MultiByteToWideChar_hook,
+                &orig_k32);
+            if (orig_kb) {
+                MultiByteToWideChar_orig = orig_kb;
+            } else if (orig_k32) {
+                MultiByteToWideChar_orig = orig_k32;
+            }
+            if ((kb || k32) && MultiByteToWideChar_orig) {
+                log_info("hooks::lang",
+                        "MultiByteToWideChar trampoline installed for legacy IIDX "
+                        "(kernelbase={}, kernel32={})",
+                        kb, k32);
+            } else {
+                log_warning("hooks::lang",
+                        "MultiByteToWideChar trampoline failed for legacy IIDX "
+                        "(colon overlap likely on non-Japanese hosts)");
+            }
+        }
     }
 
 #ifdef SPICE64
@@ -403,14 +439,29 @@ void hooks::lang::init() {
     if (!MultiByteToWideChar_orig && prev) {
         MultiByteToWideChar_orig = prev;
     }
+
+    // Fallback trampoline if early_init did not cover this model.
+    if (!MultiByteToWideChar_orig) {
+        decltype(MultiByteToWideChar) *orig_kb = nullptr;
+        decltype(MultiByteToWideChar) *orig_k32 = nullptr;
+        detour::trampoline_try(
+                "kernelbase.dll",
+                "MultiByteToWideChar",
+                MultiByteToWideChar_hook,
+                &orig_kb);
+        detour::trampoline_try(
+                "kernel32.dll",
+                "MultiByteToWideChar",
+                MultiByteToWideChar_hook,
+                &orig_k32);
+        MultiByteToWideChar_orig = orig_kb ? orig_kb : orig_k32;
+    }
 }
 
 void hooks::lang::init_module(HMODULE module) {
     if (!module) {
         return;
     }
-
-    log_info("hooks::lang", "initializing module {:#x}", reinterpret_cast<uintptr_t>(module));
 
     auto *prev = detour::iat_try(
             "MultiByteToWideChar",
@@ -421,7 +472,18 @@ void hooks::lang::init_module(HMODULE module) {
         MultiByteToWideChar_orig = prev;
     }
     if (!prev) {
-        log_warning("hooks::lang", "MultiByteToWideChar not in module IAT");
+        // Common for delay-loaded / GDI-only modules (e.g. d3d8to9). Harmless
+        // when the process-wide trampoline or game EXE IAT is already hooked —
+        // only note it for the game image itself.
+        if (module == avs::game::DLL_INSTANCE) {
+            log_misc("hooks::lang",
+                    "MultiByteToWideChar not in game module IAT ({:#x}); "
+                    "relying on trampoline",
+                    reinterpret_cast<uintptr_t>(module));
+        }
+    } else {
+        log_misc("hooks::lang", "MultiByteToWideChar IAT hooked in module {:#x}",
+                reinterpret_cast<uintptr_t>(module));
     }
 }
 

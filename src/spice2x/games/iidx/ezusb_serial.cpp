@@ -495,8 +495,9 @@ void set_read_buf(const uint8_t *data, size_t len) {
     memcpy(g_read_buf, data, len);
     g_read_len = static_cast<uint16_t>(len);
     g_read_page = 0;
-    // bemanitools never asserts read_buf_busy (msg.c: "always cleared to pass
-    // on boot"). Asserting it here made UART echo replies stall INIT.
+    // Match bemanitools node-serial.c: read/write busy flags are never raised.
+    // ezusb.dll polls INT offset for busy clear after CLEAR_READ/WRITE; leaving
+    // busy stuck true (or raising it on replies) breaks uart INIT0 / H8 init.
     g_read_busy = false;
     g_write_len = 0;
 }
@@ -510,6 +511,7 @@ void exec_write_buf() {
     // that is four bytes starting with 0xAA, unchanged.
     if (g_write_buf[0] == 0x00
             || (g_write_len == 4 && g_write_buf[0] == HEADER_BYTE)) {
+        log_info("iidx::serial", "uart echo (trash/init) len={}", g_write_len);
         set_read_buf(g_write_buf, g_write_len);
         return;
     }
@@ -538,6 +540,7 @@ void exec_write_buf() {
     if (msg_len == 2 && msg_buf[0] == HEADER_BYTE && msg_buf[1] == HEADER_BYTE) {
         uint8_t frame[4] = {HEADER_BYTE, HEADER_BYTE, HEADER_BYTE, 0};
         frame[3] = checksum(frame + 1, 2);
+        log_info("iidx::serial", "uart reset AA AA echo");
         set_read_buf(frame, 4);
         return;
     }
@@ -566,6 +569,8 @@ void exec_write_buf() {
         frame.push_back(checksum(inner.data(), static_cast<uint16_t>(inner.size())));
     }
 
+    log_info("iidx::serial", "reply msg={:02x} node={} cmd={:02x} out={}",
+            msg->msg_cmd, msg->node_id, msg->node_cmd, frame.size());
     set_read_buf(frame.data(), frame.size());
 }
 
@@ -600,6 +605,7 @@ void init() {
 
 uint8_t process_cmd(uint8_t cmd) {
     std::lock_guard lock(g_mu);
+    log_misc("iidx::serial", "process_cmd {:02x} read_len={}", cmd, g_read_len);
     switch (cmd) {
         case 0x02: // READ_BUFFER
             g_read_busy = false;
@@ -671,8 +677,10 @@ bool write_packet(const uint8_t *packet) {
     g_write_len = static_cast<uint16_t>(g_write_len + data_length);
 
     if (execute) {
+        log_info("iidx::serial", "serial write exec page={:02x} len={}", page, g_write_len);
         exec_write_buf();
-        g_write_page = 0;
+        // bemanitools only clears write_buf_data_len here; WRITE_BUFFER /
+        // CLEAR_WRITE reset the page. Keep page sticky across execute.
         g_write_len = 0;
     }
     return true;

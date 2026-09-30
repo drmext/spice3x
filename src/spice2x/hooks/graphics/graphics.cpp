@@ -1461,6 +1461,16 @@ void graphics_init() {
     SetWindowPos_orig = detour::iat_try("SetWindowPos", SetWindowPos_hook);
     ShowWindow_orig = detour::iat_try("ShowWindow", ShowWindow_hook);
     GetClientRect_orig = detour::iat_try("GetClientRect", GetClientRect_hook);
+    // IIDX 9-13 viewport sizing often calls GetClientRect outside IAT; trampoline.
+    if (avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD"})) {
+        decltype(GetClientRect) *tramp_orig = nullptr;
+        if (detour::trampoline_try(
+                "user32.dll", "GetClientRect", GetClientRect_hook, &tramp_orig)
+                && tramp_orig) {
+            GetClientRect_orig = tramp_orig;
+            log_info("graphics", "GetClientRect trampoline installed for legacy IIDX viewport");
+        }
+    }
 
     detour::iat_try("MessageBoxA", MessageBoxA_hook);
     detour::iat_try("MessageBoxExA", MessageBoxExA_hook);

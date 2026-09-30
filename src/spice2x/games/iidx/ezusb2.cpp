@@ -696,6 +696,8 @@ bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
             return true;
         case NODE_FPGA_V2_OR_SERIAL:
             if (is_serial_board()) {
+                log_info("iidx::ezusb2", "serial node cmd={:02x} d0={:02x} d1={:02x}",
+                        cmd, d0, d1);
                 g_status = ezusb_serial::process_cmd(cmd);
                 return true;
             }
@@ -906,6 +908,10 @@ bool bulk_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
                 }
                 break;
             }
+            if (is_serial_board()) {
+                log_warning("iidx::ezusb2",
+                        "bulk read while cur_node={:02x} (want serial 0x04)", g_cur_node);
+            }
             // FPGA/security-mem/wdt stub: empty page
             break;
         default:
@@ -955,6 +961,10 @@ bool bulk_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
         case NODE_WDT:
             if (is_serial_board() && pkg.node == NODE_FPGA_V2_OR_SERIAL) {
                 return ezusb_serial::write_packet(reinterpret_cast<const uint8_t *>(&pkg));
+            }
+            if (is_serial_board()) {
+                log_warning("iidx::ezusb2",
+                        "serial-era bulk write discarded node={:02x}", pkg.node);
             }
             // accept and discard FPGA firmware / wdt pages
             return true;
@@ -1071,6 +1081,7 @@ bool EZUSB2Handle::open(LPCWSTR lpFileName) {
             ezusb_serial::init();
             serial_once = true;
         } else {
+            log_info("iidx::ezusb2", "Ezusb-0 reopen; serial reset_buffers");
             ezusb_serial::reset_buffers();
         }
     }

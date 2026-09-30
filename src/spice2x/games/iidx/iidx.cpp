@@ -13,6 +13,7 @@
 #include "hooks/cfgmgr32hook.h"
 #include "hooks/devicehook.h"
 #include "hooks/graphics/graphics.h"
+#include "hooks/lang.h"
 #ifdef SPICE64
 #include "hooks/graphics/nvenc_hook.h"
 #endif
@@ -434,6 +435,15 @@ namespace games::iidx {
                 }
                 // Patch the exe IAT after threads resume (PEB walk skips it)
                 devicehook_init_module(avs::game::DLL_INSTANCE);
+                // ezusb.dll / eam3lib are static imports — ensure their IATs are
+                // hooked even if devicehook_init()'s PEB walk raced load order.
+                if (HMODULE ezusb = libutils::try_module("ezusb.dll")) {
+                    devicehook_init_module(ezusb);
+                }
+                if (HMODULE eam3 = libutils::try_module("eam3lib.dll")) {
+                    devicehook_init_module(eam3);
+                    hooks::lang::init_module(eam3);
+                }
                 if (use_icca_keepalive) {
                     jdj_hook_icca_keepalive(avs::game::DLL_INSTANCE);
                 }

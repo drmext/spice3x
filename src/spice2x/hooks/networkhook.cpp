@@ -1,4 +1,5 @@
 #include <winsock2.h>
+#include <ws2tcpip.h>
 
 #include <windows.h>
 #include <iphlpapi.h>
@@ -6,6 +7,7 @@
 #include <string>
 #include <mutex>
 #include <stddef.h>
+#include <cstring>
 
 #include "avs/core.h"
 #include "avs/ea3.h"
@@ -21,6 +23,13 @@
 static decltype(GetAdaptersInfo) *GetAdaptersInfo_orig = nullptr;
 static decltype(GetIpAddrTable) *GetIpAddrTable_orig = nullptr;
 static decltype(bind) *bind_orig = nullptr;
+static decltype(connect) *connect_orig = nullptr;
+static decltype(gethostbyname) *gethostbyname_orig = nullptr;
+
+// IIDX 9-13 eamuse3 resolves the literal hostname "services".
+static uint32_t legacy_eamuse_addr = 0; // network byte order
+static uint16_t legacy_eamuse_port = 80; // host byte order
+static bool legacy_eamuse_enabled = false;
 
 // settings
 std::string NETWORK_ADDRESS = "10.9.0.0";
@@ -336,10 +345,213 @@ static int WINAPI bind_hook(SOCKET s, const struct sockaddr *name, int namelen) 
     return ret;
 }
 
+static bool parse_legacy_eamuse_url(const std::string &url, uint32_t *addr_out, uint16_t *port_out) {
+    if (url.empty() || !addr_out || !port_out) {
+        return false;
+    }
+
+    std::string host = url;
+    if (auto pos = host.find("://"); pos != std::string::npos) {
+        host = host.substr(pos + 3);
+    }
+    if (auto pos = host.find('/'); pos != std::string::npos) {
+        host = host.substr(0, pos);
+    }
+
+    uint16_t port = 80;
+    auto colon = host.rfind(':');
+    if (colon != std::string::npos) {
+        port = static_cast<uint16_t>(atoi(host.c_str() + colon + 1));
+        if (port == 0) {
+            port = 80;
+        }
+        host = host.substr(0, colon);
+    }
+    if (host.empty()) {
+        return false;
+    }
+
+    unsigned long addr = inet_addr(host.c_str());
+    if (addr == INADDR_NONE) {
+        if (host == "localhost") {
+            addr = inet_addr("127.0.0.1");
+        } else {
+            auto *resolver = gethostbyname_orig ? gethostbyname_orig : ::gethostbyname;
+            auto *he = resolver(host.c_str());
+            if (!he || !he->h_addr_list || !he->h_addr_list[0]) {
+                return false;
+            }
+            memcpy(&addr, he->h_addr_list[0], sizeof(addr));
+        }
+    }
+
+    *addr_out = static_cast<uint32_t>(addr);
+    *port_out = port;
+    return true;
+}
+
+static hostent *WSAAPI gethostbyname_legacy_hook(const char *name) {
+    if (legacy_eamuse_enabled && name && strcmp(name, "services") == 0) {
+        static hostent ret {};
+        static char *addr_list[2] {};
+        static uint32_t addr = 0;
+        static bool init = false;
+        if (!init) {
+            ret.h_length = 4;
+            ret.h_addrtype = AF_INET;
+            ret.h_addr_list = addr_list;
+            addr_list[0] = reinterpret_cast<char *>(&addr);
+            addr_list[1] = nullptr;
+            init = true;
+        }
+        addr = legacy_eamuse_addr;
+        log_info("network", "legacy eamuse3: gethostbyname(\"services\") -> {:08x}:{}",
+                ntohl(legacy_eamuse_addr), legacy_eamuse_port);
+        return &ret;
+    }
+    return gethostbyname_orig(name);
+}
+
+static int WSAAPI connect_legacy_hook(SOCKET s, const sockaddr *name, int namelen) {
+    if (legacy_eamuse_enabled && name && name->sa_family == AF_INET) {
+        auto *in = reinterpret_cast<sockaddr_in *>(const_cast<sockaddr *>(name));
+        if (in->sin_addr.s_addr == legacy_eamuse_addr) {
+            log_misc("network", "legacy eamuse3: patch connect port {} -> {}",
+                    ntohs(in->sin_port), legacy_eamuse_port);
+            in->sin_port = htons(legacy_eamuse_port);
+        }
+    }
+    return connect_orig(s, name, namelen);
+}
+
+static void install_legacy_eamuse_hooks() {
+    // Match bemanitools iidxhook1-3 eamuse.c: IIDX 9-13 resolve the literal
+    // hostname "services" (not services.eamuse.konami.fun) and connect with a
+    // hard-coded port — redirect both to -url.
+    if (!avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD"})) {
+        log_misc("network", "legacy eamuse3: skip (model is not IIDX 9-13)");
+        return;
+    }
+
+    std::string url = avs::ea3::URL_CUSTOM;
+    if (url.empty()) {
+        // Same default as -ea (easrv_port 8080). Injected path sets URL_CUSTOM
+        // from -url before networkhook_init; empty means user passed neither.
+        url = "localhost:8080";
+        log_info("network", "legacy eamuse3: URL_CUSTOM empty, defaulting to '{}'", url);
+    }
+
+    if (!parse_legacy_eamuse_url(url, &legacy_eamuse_addr, &legacy_eamuse_port)) {
+        log_warning("network", "legacy eamuse3: failed to resolve services URL '{}'", url);
+        return;
+    }
+
+    legacy_eamuse_enabled = true;
+
+    // Ensure ws2_32 is mapped before MinHook (injected C02 may not have touched
+    // Winsock yet). trampoline_try now LoadLibrary's if needed as well.
+    libutils::try_library("ws2_32.dll");
+
+    bool ghbn_ok = detour::trampoline_try(
+            "ws2_32.dll", "gethostbyname",
+            gethostbyname_legacy_hook, &gethostbyname_orig);
+    bool conn_ok = detour::trampoline_try(
+            "ws2_32.dll", "connect",
+            connect_legacy_hook, &connect_orig);
+
+    // Belt-and-suspenders like bemanitools hook_table_apply: patch IATs by name
+    // and by frozen WS2_32 ordinals (4=connect, 52=gethostbyname). Captures
+    // callers that somehow bypass the trampoline, and the injected game EXE.
+    auto *ghbn_iat = detour::iat_try(
+            "gethostbyname", gethostbyname_legacy_hook, nullptr, "ws2_32.dll");
+    auto *conn_iat = detour::iat_try(
+            "connect", connect_legacy_hook, nullptr, "ws2_32.dll");
+    if (!gethostbyname_orig && ghbn_iat) {
+        gethostbyname_orig = ghbn_iat;
+    }
+    if (!connect_orig && conn_iat) {
+        connect_orig = conn_iat;
+    }
+
+    if (avs::game::DLL_INSTANCE) {
+        auto *ghbn_ord = detour::iat_try_ordinal(
+                "ws2_32.dll", 52, gethostbyname_legacy_hook, avs::game::DLL_INSTANCE);
+        auto *conn_ord = detour::iat_try_ordinal(
+                "ws2_32.dll", 4, connect_legacy_hook, avs::game::DLL_INSTANCE);
+        if (!gethostbyname_orig && ghbn_ord) {
+            gethostbyname_orig = ghbn_ord;
+        }
+        if (!connect_orig && conn_ord) {
+            connect_orig = conn_ord;
+        }
+        // Named IAT on the game image (PEB walk skips process EXE).
+        auto *ghbn_exe = detour::iat_try(
+                "gethostbyname", gethostbyname_legacy_hook,
+                avs::game::DLL_INSTANCE, "ws2_32.dll");
+        auto *conn_exe = detour::iat_try(
+                "connect", connect_legacy_hook,
+                avs::game::DLL_INSTANCE, "ws2_32.dll");
+        if (!gethostbyname_orig && ghbn_exe) {
+            gethostbyname_orig = ghbn_exe;
+        }
+        if (!connect_orig && conn_exe) {
+            connect_orig = conn_exe;
+        }
+    }
+
+    // eam3lib resolves "services"; avs.dll's avs_socket_connect calls ws2_32
+    // connect with the default HTTP port from http://services/. Patch both IATs
+    // even if already mapped before networkhook_init (static imports).
+    for (const char *mod_name : {"eam3lib.dll", "avs.dll"}) {
+        HMODULE mod = libutils::try_module(mod_name);
+        if (!mod) {
+            continue;
+        }
+        auto *ghbn = detour::iat_try(
+                "gethostbyname", gethostbyname_legacy_hook, mod, "ws2_32.dll");
+        auto *conn = detour::iat_try(
+                "connect", connect_legacy_hook, mod, "ws2_32.dll");
+        if (!gethostbyname_orig && ghbn) {
+            gethostbyname_orig = ghbn;
+        }
+        if (!connect_orig && conn) {
+            connect_orig = conn;
+        }
+        // Ordinals too (some builds import by ordinal only).
+        auto *ghbn_o = detour::iat_try_ordinal(
+                "ws2_32.dll", 52, gethostbyname_legacy_hook, mod);
+        auto *conn_o = detour::iat_try_ordinal(
+                "ws2_32.dll", 4, connect_legacy_hook, mod);
+        if (!gethostbyname_orig && ghbn_o) {
+            gethostbyname_orig = ghbn_o;
+        }
+        if (!connect_orig && conn_o) {
+            connect_orig = conn_o;
+        }
+        log_info("network", "legacy eamuse3: patched IAT on {}", mod_name);
+    }
+
+    if (!gethostbyname_orig) {
+        gethostbyname_orig = ::gethostbyname;
+    }
+    if (!connect_orig) {
+        connect_orig = ::connect;
+    }
+
+    log_info("network",
+            "legacy eamuse3 services redirect enabled "
+            "(url='{}' -> {:08x}:{}, trampoline ghbn={} connect={})",
+            url, ntohl(legacy_eamuse_addr), legacy_eamuse_port,
+            ghbn_ok, conn_ok);
+}
+
 void networkhook_init() {
 
     // announce init
     log_info("network", "SpiceTools Network");
+
+    // IIDX 9-13: redirect eamuse3 "services" hostname to -url / local easrv.
+    install_legacy_eamuse_hooks();
 
     // set some same defaults
     network.s_addr = inet_addr(NETWORK_ADDRESS.c_str());
@@ -359,7 +571,14 @@ void networkhook_init() {
     auto orig_addr = detour::iat_try(
         "GetAdaptersInfo", GetAdaptersInfo_hook, nullptr);
     if (!orig_addr) {
-        log_warning("network", "Could not hook GetAdaptersInfo");
+        libutils::try_library("iphlpapi.dll");
+        if (detour::trampoline_try(
+                "iphlpapi.dll", "GetAdaptersInfo",
+                GetAdaptersInfo_hook, &GetAdaptersInfo_orig)) {
+            log_info("network", "GetAdaptersInfo trampoline installed");
+        } else {
+            log_warning("network", "Could not hook GetAdaptersInfo");
+        }
     } else if (GetAdaptersInfo_orig == nullptr) {
         GetAdaptersInfo_orig = orig_addr;
     }
@@ -368,7 +587,23 @@ void networkhook_init() {
     auto ip_addr_table_orig_addr = detour::iat_try(
         "GetIpAddrTable", GetIpAddrTable_hook, nullptr);
     if (!ip_addr_table_orig_addr) {
-        log_warning("network", "Could not hook GetIpAddrTable");
+        // Injected 9-13 often miss this in the PEB IAT walk; trampoline instead.
+        // Load iphlpapi first — MinHook GetModuleHandle fails if it is not mapped.
+        libutils::try_library("iphlpapi.dll");
+        if (detour::trampoline_try(
+                "iphlpapi.dll", "GetIpAddrTable",
+                GetIpAddrTable_hook, &GetIpAddrTable_orig)) {
+            log_info("network", "GetIpAddrTable trampoline installed");
+        } else if (avs::game::DLL_INSTANCE &&
+                (ip_addr_table_orig_addr = detour::iat_try(
+                        "GetIpAddrTable", GetIpAddrTable_hook,
+                        avs::game::DLL_INSTANCE, "iphlpapi.dll"))) {
+            GetIpAddrTable_orig = ip_addr_table_orig_addr;
+            log_info("network", "GetIpAddrTable IAT hooked on game module");
+        } else {
+            log_warning("network",
+                    "Could not hook GetIpAddrTable (IAT miss, trampoline also failed)");
+        }
     } else if (GetIpAddrTable_orig == nullptr) {
         GetIpAddrTable_orig = ip_addr_table_orig_addr;
     }

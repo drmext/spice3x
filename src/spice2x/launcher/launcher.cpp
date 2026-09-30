@@ -1991,8 +1991,9 @@ int main_implementation(int argc, char *argv[]) {
         }
 
         // 9-12 only ship avs.dll (no property_search / ea3_boot). The game owns
-        // boot; eam3lib is the old eamuse3 client and nicspoof covers services.
-        // DistorteD and later have libavs-win32.dll.
+        // boot; eam3lib is the old eamuse3 client. networkhook_init installs
+        // gethostbyname("services") + connect port redirects to -url (bemanitools
+        // iidxhook1-3 style). DistorteD and later have libavs-win32.dll.
         const bool skip_avs_dll = avs::game::is_model({"C02", "D01", "E11", "ECO"});
         if (skip_avs_dll) {
             log_info("launcher",
