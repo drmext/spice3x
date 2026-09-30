@@ -25,6 +25,7 @@ constexpr UINT CODEPAGE_SHIFT_JIS = 932;
 
 static decltype(GetACP) *GetACP_orig = nullptr;
 static decltype(GetOEMCP) *GetOEMCP_orig = nullptr;
+static decltype(GetCPInfo) *GetCPInfo_orig = nullptr;
 static decltype(MultiByteToWideChar) *MultiByteToWideChar_orig = nullptr;
 static decltype(WideCharToMultiByte) *WideCharToMultiByte_orig = nullptr;
 static decltype(GetLocaleInfoEx) *GetLocaleInfoEx_orig = nullptr;
@@ -97,6 +98,22 @@ static UINT WINAPI GetACP_hook() {
 
 static UINT WINAPI GetOEMCP_hook() {
     return CODEPAGE_SHIFT_JIS;
+}
+
+// GetACP alone is not enough: GDI / bm2dx call GetCPInfo(CP_ACP) for MaxCharSize
+// and LeadByte ranges. On a Western host that still returns SBCS info while GetACP
+// says 932 → fullwidth colon (SJIS 8146) drawn as two overlapping glyphs.
+static BOOL WINAPI GetCPInfo_hook(UINT CodePage, LPCPINFO lpCPInfo) {
+    switch (CodePage) {
+        case CP_ACP:
+        case CP_OEMCP:
+        case CP_THREAD_ACP:
+            CodePage = CODEPAGE_SHIFT_JIS;
+            break;
+        default:
+            break;
+    }
+    return GetCPInfo_orig(CodePage, lpCPInfo);
 }
 
 #ifdef SPICE64
@@ -289,9 +306,9 @@ void hooks::lang::early_init() {
             "    some games may render text incorrectly or behave unexpectedly"});
     }
 
-    // Prefer kernelbase: gdi32full imports GetACP/GetOEMCP via api-ms-* which
-    // resolve to kernelbase, not the kernel32 jmp stubs. Hooking only kernel32
-    // leaves GDI on the host ACP (colon overlap on IIDX 9-13 status text).
+    // Prefer kernelbase: gdi32full imports GetACP/GetOEMCP/GetCPInfo via api-ms-*
+    // which resolve to kernelbase, not the kernel32 jmp stubs. Hooking only
+    // kernel32 leaves GDI on the host ACP (colon overlap on IIDX 9-13 status).
     {
         decltype(GetACP) *orig = nullptr;
         if (detour::trampoline_try("kernelbase.dll", "GetACP", GetACP_hook, &orig) && orig) {
@@ -306,6 +323,19 @@ void hooks::lang::early_init() {
         } else {
             orig = nullptr;
             detour::trampoline_try("kernel32.dll", "GetOEMCP", GetOEMCP_hook, &GetOEMCP_orig);
+        }
+        decltype(GetCPInfo) *cp_orig = nullptr;
+        if (detour::trampoline_try("kernelbase.dll", "GetCPInfo", GetCPInfo_hook, &cp_orig)
+                && cp_orig) {
+            GetCPInfo_orig = cp_orig;
+            log_info("hooks::lang", "GetCPInfo trampoline installed (kernelbase.dll)");
+        } else {
+            cp_orig = nullptr;
+            if (detour::trampoline_try("kernel32.dll", "GetCPInfo", GetCPInfo_hook, &cp_orig)
+                    && cp_orig) {
+                GetCPInfo_orig = cp_orig;
+                log_info("hooks::lang", "GetCPInfo trampoline installed (kernel32.dll)");
+            }
         }
     }
 
@@ -404,34 +434,11 @@ void hooks::lang::early_init() {
             }
         }
 
-        // GDI text extent converts via kernelbase ACP paths. IAT-only MB2WC is
-        // not enough for IIDX 9-13 (GetProcAddress / delay-load / gdi32).
-        //
-        // Hook exactly ONE export: on Win10+ kernel32's MB2WC is a jmp into
-        // kernelbase. Hooking both with the same detour re-enters the hook and
-        // AVs (0xC0000005) during early_init.
+        // GDI text extent: GetACP/GetCPInfo/IsDBCS + RtlMultiByteToUnicodeN cover
+        // layout. Do NOT trampoline MultiByteToWideChar process-wide on legacy
+        // IIDX — eam3lib XML parsing (xrpc_data_get) AVs on C02 when CP_ACP is
+        // forced to 932 for every caller. Game EXE IAT is still hooked in init().
         if (avs::game::is_model({ "C02", "D01", "E11", "ECO", "FDD" })) {
-            decltype(MultiByteToWideChar) *orig = nullptr;
-            const char *dll = "kernelbase.dll";
-            bool ok = detour::trampoline_try(
-                    dll, "MultiByteToWideChar", MultiByteToWideChar_hook, &orig);
-            if (!ok || !orig) {
-                dll = "kernel32.dll";
-                orig = nullptr;
-                ok = detour::trampoline_try(
-                        dll, "MultiByteToWideChar", MultiByteToWideChar_hook, &orig);
-            }
-            if (ok && orig) {
-                MultiByteToWideChar_orig = orig;
-                log_info("hooks::lang",
-                        "MultiByteToWideChar trampoline installed for legacy IIDX ({})",
-                        dll);
-            } else {
-                log_warning("hooks::lang",
-                        "MultiByteToWideChar trampoline failed for legacy IIDX "
-                        "(colon overlap likely on non-Japanese hosts)");
-            }
-
             // bemanitools ACP hook: gdi32full imports RtlMultiByteToUnicodeN from
             // ntdll for ANSI text. IAT walk can miss late loads; trampoline catches all.
             if (detour::trampoline_try(
@@ -492,35 +499,56 @@ void hooks::lang::init() {
     }
 
     // Preserve MinHook trampoline orig if early_init already installed it.
-    auto *prev = detour::iat_try(
-            "MultiByteToWideChar",
-            MultiByteToWideChar_hook,
-            nullptr,
-            "kernel32.dll");
-    if (!MultiByteToWideChar_orig && prev) {
-        MultiByteToWideChar_orig = prev;
-    }
+    //
+    // For IIDX 9-13 (C02–FDD): only IAT-hook the game image. PEB-wide IAT and
+    // kernelbase trampolines also patch eam3lib, which then AVs in xml_parse
+    // after services connect (seen on C02). Font layout uses GetACP/GetCPInfo/
+    // IsDBCS + RtlMultiByteToUnicodeN instead.
+    const bool legacy_iidx_mb2wc =
+            avs::game::is_model({ "C02", "D01", "E11", "ECO", "FDD" });
 
-    // Fallback trampoline if early_init did not cover this model.
-    // One export only — dual kernel32+kernelbase hooks AV on Win10+ forwarders.
-    if (!MultiByteToWideChar_orig) {
-        decltype(MultiByteToWideChar) *orig = nullptr;
-        if (detour::trampoline_try(
-                    "kernelbase.dll",
+    if (legacy_iidx_mb2wc) {
+        if (avs::game::DLL_INSTANCE) {
+            auto *prev = detour::iat_try(
                     "MultiByteToWideChar",
                     MultiByteToWideChar_hook,
-                    &orig)
-                && orig) {
-            MultiByteToWideChar_orig = orig;
-        } else {
-            orig = nullptr;
+                    avs::game::DLL_INSTANCE,
+                    "kernel32.dll");
+            if (!MultiByteToWideChar_orig && prev) {
+                MultiByteToWideChar_orig = prev;
+            }
+        }
+    } else {
+        auto *prev = detour::iat_try(
+                "MultiByteToWideChar",
+                MultiByteToWideChar_hook,
+                nullptr,
+                "kernel32.dll");
+        if (!MultiByteToWideChar_orig && prev) {
+            MultiByteToWideChar_orig = prev;
+        }
+
+        // Fallback trampoline if early_init did not cover this model.
+        // One export only — dual kernel32+kernelbase hooks AV on Win10+ forwarders.
+        if (!MultiByteToWideChar_orig) {
+            decltype(MultiByteToWideChar) *orig = nullptr;
             if (detour::trampoline_try(
-                        "kernel32.dll",
+                        "kernelbase.dll",
                         "MultiByteToWideChar",
                         MultiByteToWideChar_hook,
                         &orig)
                     && orig) {
                 MultiByteToWideChar_orig = orig;
+            } else {
+                orig = nullptr;
+                if (detour::trampoline_try(
+                            "kernel32.dll",
+                            "MultiByteToWideChar",
+                            MultiByteToWideChar_hook,
+                            &orig)
+                        && orig) {
+                    MultiByteToWideChar_orig = orig;
+                }
             }
         }
     }

@@ -395,8 +395,9 @@ namespace games::iidx {
                     || avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
             const bool is_2235_desc = is_c02_era || avs::game::is_model("JDJ");
             const bool use_com_icca = avs::game::is_model({"FDD", "GLD", "HDD", "I00", "JDJ"});
-            const bool use_icca_keepalive =
-                    avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
+            // FDD–JDJ all import ac_io_icca_*_keep_alive_*; without stubs libacio
+            // reports faults and the game shows 5-1503 CARD DEVICE ERROR 1:1.
+            const bool use_icca_keepalive = use_com_icca;
 
             // EZ-USB setupapi entry (same GUID for 2235 and FX2 generations)
             SETUPAPI_SETTINGS settings1 {};
@@ -442,10 +443,32 @@ namespace games::iidx {
                 }
                 if (HMODULE eam3 = libutils::try_module("eam3lib.dll")) {
                     devicehook_init_module(eam3);
-                    hooks::lang::init_module(eam3);
+                    // Do not hooks::lang::init_module(eam3): forcing CP_ACP→932
+                    // through eam3lib's MB2WC IAT crashes C02 in xml_parse /
+                    // xrpc_data_get after services connect.
                 }
                 if (use_icca_keepalive) {
                     jdj_hook_icca_keepalive(avs::game::DLL_INSTANCE);
+                    // Some builds resolve keep-alive via delay-load / GetProcAddress
+                    // off libacio; cover the export trampoline too.
+                    using ka_send_t = decltype(ac_io_icca_send_keep_alive_packet_hook);
+                    using ka_err_t = decltype(ac_io_icca_get_keep_alive_error_hook);
+                    static ka_send_t *ka_send_orig = nullptr;
+                    static ka_err_t *ka_err_orig = nullptr;
+                    if (!ka_send_orig) {
+                        detour::trampoline_try(
+                                "libacio.dll",
+                                "ac_io_icca_send_keep_alive_packet",
+                                ac_io_icca_send_keep_alive_packet_hook,
+                                &ka_send_orig);
+                    }
+                    if (!ka_err_orig) {
+                        detour::trampoline_try(
+                                "libacio.dll",
+                                "ac_io_icca_get_keep_alive_error",
+                                ac_io_icca_get_keep_alive_error_hook,
+                                &ka_err_orig);
+                    }
                 }
                 if (is_c02_era) {
                     block_operator_clock(avs::game::DLL_INSTANCE);

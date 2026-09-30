@@ -1,8 +1,11 @@
 #include "ezusb_serial.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "avs/game.h"
@@ -100,6 +103,47 @@ struct Slot {
     uint8_t write_loopback[128] {};
 };
 Slot g_slot[2] {};
+std::atomic<bool> g_poll_run{false};
+std::thread g_poll_thread;
+
+uint8_t keypad_scan_code(uint8_t bit);
+
+void poll_keypad_locked(uint8_t node) {
+    if (node < 1 || node > 2) {
+        return;
+    }
+    Slot &s = g_slot[node - 1];
+    const size_t unit = node - 1;
+    const uint16_t kp = eamuse_get_keypad_state(unit);
+    const uint16_t rise = kp & static_cast<uint16_t>(~s.last_keypad);
+    s.last_keypad = kp;
+    // Only latch a new code when the buffer is empty; keep last_keypad updated
+    // so a held key does not re-fire, matching bemanitools' single-byte buffer.
+    if (rise && s.keypad_code == 0) {
+        for (uint8_t i = 0; i < 12; i++) {
+            if (rise & (1u << i)) {
+                const uint8_t code = keypad_scan_code(i);
+                if (code != 0) {
+                    s.keypad_code = code;
+                }
+                break;
+            }
+        }
+    }
+}
+
+void poll_thread_main() {
+    // bemanitools node-serial emu thread: sample eamio ~100Hz so brief keypad
+    // presses are not missed between rare KEYBOARD_* serial commands.
+    while (g_poll_run.load(std::memory_order_relaxed)) {
+        {
+            std::lock_guard lock(g_mu);
+            poll_keypad_locked(1);
+            poll_keypad_locked(2);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
 
 uint8_t crc8(const uint8_t *data, size_t len) {
     uint8_t crc = 0xFF;
@@ -250,25 +294,14 @@ void poll_slot(uint8_t node) {
         }
     }
 
-    // Complete a pending READ request without a background thread.
+    // Complete a pending READ request without a background card thread.
     if (s.card_slot_state == SLOT_READ) {
         try_read_card(s, unit);
     }
 
-    const uint16_t kp = eamuse_get_keypad_state(unit);
-    const uint16_t rise = kp & static_cast<uint16_t>(~s.last_keypad);
-    s.last_keypad = kp;
-    if (rise && s.keypad_code == 0) {
-        for (uint8_t i = 0; i < 12; i++) {
-            if (rise & (1u << i)) {
-                const uint8_t code = keypad_scan_code(i);
-                if (code != 0) {
-                    s.keypad_code = code;
-                }
-                break;
-            }
-        }
-    }
+    // Keypad is sampled on the poll thread; keep a pass here so serial-only
+    // paths still work if the thread is not running yet.
+    poll_keypad_locked(node);
 }
 
 void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
@@ -320,7 +353,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
                 if (s.emu == EmuState::Uninit) {
                     // bemanitools waits for a thread INIT->LOOP; do it inline.
                     s.emu = EmuState::Loop;
-                    log_info("iidx::serial", "H8_PROG_EXEC node {} -> LOOP", in->node_id);
+                    log_misc("iidx::serial", "H8_PROG_EXEC node {} -> LOOP", in->node_id);
                 } else if (s.emu == EmuState::Error) {
                     status = 0xFF;
                     log_warning("iidx::serial", "H8_PROG_EXEC node {} in ERROR", in->node_id);
@@ -511,7 +544,7 @@ void exec_write_buf() {
     // that is four bytes starting with 0xAA, unchanged.
     if (g_write_buf[0] == 0x00
             || (g_write_len == 4 && g_write_buf[0] == HEADER_BYTE)) {
-        log_info("iidx::serial", "uart echo (trash/init) len={}", g_write_len);
+        log_misc("iidx::serial", "uart echo (trash/init) len={}", g_write_len);
         set_read_buf(g_write_buf, g_write_len);
         return;
     }
@@ -540,7 +573,7 @@ void exec_write_buf() {
     if (msg_len == 2 && msg_buf[0] == HEADER_BYTE && msg_buf[1] == HEADER_BYTE) {
         uint8_t frame[4] = {HEADER_BYTE, HEADER_BYTE, HEADER_BYTE, 0};
         frame[3] = checksum(frame + 1, 2);
-        log_info("iidx::serial", "uart reset AA AA echo");
+        log_misc("iidx::serial", "uart reset AA AA echo");
         set_read_buf(frame, 4);
         return;
     }
@@ -569,7 +602,7 @@ void exec_write_buf() {
         frame.push_back(checksum(inner.data(), static_cast<uint16_t>(inner.size())));
     }
 
-    log_info("iidx::serial", "reply msg={:02x} node={} cmd={:02x} out={}",
+    log_misc("iidx::serial", "reply msg={:02x} node={} cmd={:02x} out={}",
             msg->msg_cmd, msg->node_id, msg->node_cmd, frame.size());
     set_read_buf(frame.data(), frame.size());
 }
@@ -589,6 +622,13 @@ void reset_buffers() {
 }
 
 void init() {
+    // Stop a previous poll thread if init() is called again (ezusb reopen).
+    if (g_poll_run.exchange(false)) {
+        if (g_poll_thread.joinable()) {
+            g_poll_thread.join();
+        }
+    }
+
     std::lock_guard lock(g_mu);
     g_read_busy = false;
     g_write_busy = false;
@@ -601,6 +641,9 @@ void init() {
     g_slot[0] = {};
     g_slot[1] = {};
     log_info("iidx::serial", "magnetic reader emulation initialized");
+
+    g_poll_run = true;
+    g_poll_thread = std::thread(poll_thread_main);
 }
 
 uint8_t process_cmd(uint8_t cmd) {
@@ -677,7 +720,7 @@ bool write_packet(const uint8_t *packet) {
     g_write_len = static_cast<uint16_t>(g_write_len + data_length);
 
     if (execute) {
-        log_info("iidx::serial", "serial write exec page={:02x} len={}", page, g_write_len);
+        log_misc("iidx::serial", "serial write exec page={:02x} len={}", page, g_write_len);
         exec_write_buf();
         // bemanitools only clears write_buf_data_len here; WRITE_BUFFER /
         // CLEAR_WRITE reset the page. Keep page sticky across execute.
