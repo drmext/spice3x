@@ -17,8 +17,8 @@ namespace launcher {
         std::filesystem::path exe_path;
     };
 
-    // Look for JDJ sidcode.txt next to spice.exe (or its parent when spice
-    // was started from inside the date folder). Returns nullopt if not JDJ.
+    // Look for IIDX 14-17 sidcode.txt next to spice.exe (or its parent when
+    // spice was started from inside the date folder). Accepts GLD/HDD/I00/JDJ.
     std::optional<ExeGameTarget> try_detect_jdj();
 
     // CREATE_SUSPENDED + LoadLibraryW of the embedded hook + spice_exe_init,

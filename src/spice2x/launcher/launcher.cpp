@@ -312,8 +312,8 @@ int main_implementation(int argc, char *argv[]) {
     }
 
 #if !defined(SPICE64)
-    // MODEL defaults to "000"; MODEL[0]=='\0' never fires. Detect JDJ before
-    // get_options so spicecfg options for Beatmania IIDX are merged.
+    // MODEL defaults to "000"; MODEL[0]=='\0' never fires. Detect IIDX 14-17
+    // before get_options so spicecfg options for Beatmania IIDX are merged.
     if (avs::game::is_model("000")) {
         if (auto jdj = launcher::try_detect_jdj()) {
             if (jdj->dest.size() == 1) {
@@ -1941,7 +1941,7 @@ int main_implementation(int argc, char *argv[]) {
 
         auto target = launcher::try_detect_jdj();
         if (!target) {
-            log_fatal("launcher", "injected mode requires JDJ sidcode.txt next to the game");
+            log_fatal("launcher", "injected mode requires IIDX 14-17 sidcode.txt next to the game");
         }
 
         // GetModuleHandle(NULL) is bm2dx.exe; keep MODULE_PATH on the date folder
@@ -1979,11 +1979,12 @@ int main_implementation(int argc, char *argv[]) {
             // Arcade SD widescreen: 640x480 game RT → linear StretchRect into
             // 854x480 backbuffer (Present 1:1). Do not use -windowscale.
             // Outer HWND is larger via deco so the border is not part of 854x480.
-            if (!GRAPHICS_WINDOW_SIZE.has_value()) {
+            if (!GRAPHICS_WINDOW_SIZE.has_value()
+                    && avs::game::is_model({"GLD", "HDD", "I00", "JDJ"})) {
                 GRAPHICS_WINDOW_SIZE = {854, 480};
                 log_info(
                     "launcher",
-                    "JDJ arcade widescreen: client 854x480 with filtered 640→854 "
+                    "IIDX 14-17 arcade widescreen: client 854x480 with filtered 640→854 "
                     "backbuffer scale (override with -windowsize)");
             }
         }
@@ -2060,7 +2061,7 @@ int main_implementation(int argc, char *argv[]) {
             }
 
 #if !defined(SPICE64)
-            // IIDX 17 Sirius — bm2dx.exe in a date folder named by sidcode.txt
+            // IIDX 14-17 GOLD/DJT/EMPRESS/Sirius — bm2dx.exe in a date folder named by sidcode.txt
             if (!cfg_run && !cfg::CONFIGURATOR_STANDALONE) {
                 if (auto jdj = launcher::try_detect_jdj()) {
                     return launcher::exe_inject(*jdj);

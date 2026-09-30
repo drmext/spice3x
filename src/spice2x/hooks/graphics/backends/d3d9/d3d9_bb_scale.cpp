@@ -87,7 +87,7 @@ bool create_resources(IDirect3DDevice9 *device, D3DFORMAT format) {
 } // namespace
 
 bool should_enable() {
-    if (!GRAPHICS_WINDOWED || !avs::game::is_model("JDJ")) {
+    if (!GRAPHICS_WINDOWED || !avs::game::is_model({"GLD", "HDD", "I00", "JDJ"})) {
         return false;
     }
     if (!GRAPHICS_WINDOW_SIZE.has_value()) {

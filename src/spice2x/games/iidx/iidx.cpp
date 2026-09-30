@@ -348,6 +348,7 @@ namespace games::iidx {
             // reduce boot wait time
             hooks::sleep::init(1000, 1);
 
+            const bool is_io2_inject = avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
             const bool is_jdj = avs::game::is_model("JDJ");
 
             // EZ-USB setupapi entry (same GUID for 2235 and FX2 generations)
@@ -356,23 +357,26 @@ namespace games::iidx {
             settings1.class_guid[1] = 0x11D47F6A;
             settings1.class_guid[2] = 0x0100DD97;
             settings1.class_guid[3] = 0x59B92902;
-            // Sirius uses ezusb.sys + 2235 description; later titles use FX2LP string
+            // Sirius uses ezusb.sys + 2235 description; GOLD-EMPRESS use FX2LP;
+            // later DLL titles use the FX2LP string without the paren after 2235.
             const char property1_old[] = "Cypress EZ-USB (2235 - EEPROM missing)";
             const char property1_sirius[] = "Cypress EZ-USB (2235) - EEPROM missing";
-            const char *property1 = is_jdj ? property1_sirius : property1_old;
+            const char property1_fx2lp[] = "Cypress EZ-USB FX2LP - EEPROM missing";
+            const char *property1 = is_jdj ? property1_sirius
+                    : (is_io2_inject ? property1_fx2lp : property1_old);
             const char interface_detail1[] = "\\\\.\\Ezusb-0";
             memcpy(settings1.property_devicedesc, property1, strlen(property1) + 1);
             memcpy(settings1.interface_detail, interface_detail1, sizeof(interface_detail1));
             setupapihook_init(avs::game::DLL_INSTANCE);
             setupapihook_add(settings1);
 
-            if (is_jdj) {
+            if (is_io2_inject) {
                 // Settings, backup and avs_conf live on d:\, e:\ and f:\.
                 hooks::device::REMAP_SETTINGS_DRIVES = true;
             }
             devicehook_init();
-            if (is_jdj) {
-                // Sirius: ezusb.sys ioctls, ezusb-iidx v2 packets, round-plug v2
+            if (is_io2_inject) {
+                // GOLD-Sirius: ezusb.sys ioctls, ezusb-iidx v2 packets, round-plug v2
                 devicehook_add(new EZUSB2Handle());
                 // Two ICCA nodes on COM1; legacy framing for old libacio
                 devicehook_add(new acioemu::ACIOHandle(L"COM1", 2, true));

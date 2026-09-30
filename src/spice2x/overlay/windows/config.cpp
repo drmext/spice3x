@@ -176,7 +176,7 @@ namespace overlay::windows {
                     }
                 }
 
-                // IIDX 17 Sirius: no bm2dx.dll; detect via sidcode.txt + date/bm2dx.exe
+                // IIDX 14-17: no bm2dx.dll; detect via sidcode.txt + date/bm2dx.exe
                 if (!selected && game_name == "Beatmania IIDX"
                         && launcher::try_detect_jdj()) {
                     this->games_selected = games_list.size() - 1;

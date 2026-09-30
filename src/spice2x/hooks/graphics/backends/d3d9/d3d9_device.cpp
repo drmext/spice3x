@@ -828,8 +828,9 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::CreateTexture(
     }
 
 #ifndef SPICE64
-    // texture fix for iidx (iix18 resort anthem, iidx19 lincle)
-    if (avs::game::is_model({ "JDZ", "KDZ" })) {
+    // texture fix for iidx 14-19 (GOLD through Lincle): NVIDIA rejects this
+    // A1R5G5B5 rendertarget; rewrite to A8R8G8B8 (bemanitools iidx14_to_19).
+    if (avs::game::is_model({ "GLD", "HDD", "I00", "JDJ", "JDZ", "KDZ" })) {
 
         // patch texture format type from 15-bit+alpha to 32-bit.
         if (Width == 256 && Height == 256 && Levels == 1 && Usage == D3DUSAGE_RENDERTARGET

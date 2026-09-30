@@ -668,9 +668,9 @@ static HWND WINAPI CreateWindowExA_hook(DWORD dwExStyle, LPCSTR lpClassName, LPC
             fmt::ptr(hInstance),
             fmt::ptr(lpParam));
 
-    // IIDX 17 Sirius creates a WS_POPUP window; give it a normal frame under -w
+    // IIDX 14-17 create a WS_POPUP window; give it a normal frame under -w
     // so it matches other IIDX windowed builds. Skip nWidth==0 system windows.
-    if (GRAPHICS_WINDOWED && avs::game::is_model("JDJ") && nWidth > 0) {
+    if (GRAPHICS_WINDOWED && avs::game::is_model({"GLD", "HDD", "I00", "JDJ"}) && nWidth > 0) {
         dwExStyle = 0;
         dwStyle &= ~WS_POPUP;
         dwStyle |= WS_OVERLAPPEDWINDOW;
@@ -964,12 +964,13 @@ static BOOL WINAPI EnumDisplayDevicesA_hook(LPCTSTR lpDevice, DWORD iDevNum,
 
 #ifndef SPICE64
     // older IIDX games check for hardcoded PCI vendor/device ID pair of GPU
-    if ((avs::game::is_model("JDJ")
+    if ((avs::game::is_model("I00")
+            || avs::game::is_model("JDJ")
             || avs::game::is_model("JDZ")
             || avs::game::is_model("KDZ")) && value) {
         log_info(
             "graphics",
-            "EnumDisplayDevicesA_hook: swap DeviceID {} with {} (for IIDX 17-19)",
+            "EnumDisplayDevicesA_hook: swap DeviceID {} with {} (for IIDX 16-19)",
             lpDisplayDevice->DeviceID,
             GRAPHICS_DEVICEID.c_str());
         memcpy(&lpDisplayDevice->DeviceID, GRAPHICS_DEVICEID.c_str(), GRAPHICS_DEVICEID.size() + 1);
@@ -1491,8 +1492,8 @@ void graphics_hook_window(HWND hWnd, D3DPRESENT_PARAMETERS *pPresentationParamet
 
     // update window size for a few games
     // TODO: make this work on everything
-    // JDJ must stay off this list: arcade widescreen keeps game drawing at
-    // 640x480 (via bb_scale RT) while the client/backbuffer is 854x480.
+    // JDJ/GOLD/DJT/EMPRESS must stay off this list: arcade widescreen keeps
+    // game drawing at 640x480 (via bb_scale RT) while the client/backbuffer is 854x480.
     if (pPresentationParameters != nullptr && GRAPHICS_WINDOWED
     && (avs::game::is_model({ "K39", "L39", "M39", "JMP", "LDJ" }))) {
 

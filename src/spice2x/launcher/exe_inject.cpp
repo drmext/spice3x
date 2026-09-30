@@ -123,6 +123,26 @@ namespace launcher {
         return target;
     }
 
+    static const char *io2_style_name(const std::string &model) {
+        if (_stricmp(model.c_str(), "GLD") == 0) {
+            return "IIDX 14 GOLD";
+        }
+        if (_stricmp(model.c_str(), "HDD") == 0) {
+            return "IIDX 15 DJ TROOPERS";
+        }
+        if (_stricmp(model.c_str(), "I00") == 0) {
+            return "IIDX 16 EMPRESS";
+        }
+        if (_stricmp(model.c_str(), "JDJ") == 0) {
+            return "IIDX 17 Sirius";
+        }
+        return nullptr;
+    }
+
+    static bool is_io2_inject_model(const std::string &model) {
+        return io2_style_name(model) != nullptr;
+    }
+
     std::optional<ExeGameTarget> try_detect_jdj() {
         // Prefer sidcode next to spice.exe; also try parent when spice lives
         // inside the date folder (e.g. JDJ\2010071200\spice.exe).
@@ -141,18 +161,21 @@ namespace launcher {
             if (!target) {
                 continue;
             }
-            if (_stricmp(target->model.c_str(), "JDJ") != 0) {
-                log_misc("exe-inject", "sidcode model {} is not JDJ, ignoring",
+            if (!is_io2_inject_model(target->model)) {
+                log_misc("exe-inject", "sidcode model {} is not IIDX 14-17, ignoring",
                         target->model);
                 continue;
             }
             if (!fileutils::file_exists(target->exe_path)) {
                 log_warning("exe-inject",
-                        "JDJ sidcode points at missing exe: {}",
+                        "{} sidcode points at missing exe: {}",
+                        io2_style_name(target->model),
                         target->exe_path.string());
                 continue;
             }
-            log_info("exe-inject", "detected IIDX 17 Sirius (JDJ) at {}",
+            log_info("exe-inject", "detected {} ({}) at {}",
+                    io2_style_name(target->model),
+                    target->model,
                     target->exe_path.string());
             return target;
         }

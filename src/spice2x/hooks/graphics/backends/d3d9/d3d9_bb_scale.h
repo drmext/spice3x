@@ -2,7 +2,7 @@
 
 #include <d3d9.h>
 
-// JDJ arcade widescreen: game draws into a 640x480 RT; we StretchRect LINEAR into
+// IIDX 14-17 arcade widescreen: game draws into a 640x480 RT; we StretchRect LINEAR into
 // an 854x480 backbuffer so Present is 1:1 (bilinear, not driver Present stretch).
 namespace d3d9_bb_scale {
 
