@@ -358,32 +358,26 @@ void hooks::lang::early_init() {
         // GDI text extent converts via kernel32/kernelbase ACP paths. IAT-only
         // MB2WC is not enough for IIDX 9-13 (often GetProcAddress / delay-load /
         // gdi32 → kernelbase), which causes colon overlap on status lines.
+        //
+        // Hook exactly ONE export: on Win10+ kernel32's MB2WC is a jmp into
+        // kernelbase. Hooking both with the same detour re-enters the hook and
+        // AVs (0xC0000005) during early_init.
         if (avs::game::is_model({ "C02", "D01", "E11", "ECO", "FDD" })) {
-            // Hook kernelbase first (real body on Win10+); then kernel32 (stub or
-            // older OS). Prefer the kernelbase trampoline as orig so a hooked
-            // kernel32 stub that jmps into kernelbase cannot re-enter our hook.
-            decltype(MultiByteToWideChar) *orig_kb = nullptr;
-            decltype(MultiByteToWideChar) *orig_k32 = nullptr;
-            const bool kb = detour::trampoline_try(
-                "kernelbase.dll",
-                "MultiByteToWideChar",
-                MultiByteToWideChar_hook,
-                &orig_kb);
-            const bool k32 = detour::trampoline_try(
-                "kernel32.dll",
-                "MultiByteToWideChar",
-                MultiByteToWideChar_hook,
-                &orig_k32);
-            if (orig_kb) {
-                MultiByteToWideChar_orig = orig_kb;
-            } else if (orig_k32) {
-                MultiByteToWideChar_orig = orig_k32;
+            decltype(MultiByteToWideChar) *orig = nullptr;
+            const char *dll = "kernelbase.dll";
+            bool ok = detour::trampoline_try(
+                    dll, "MultiByteToWideChar", MultiByteToWideChar_hook, &orig);
+            if (!ok || !orig) {
+                dll = "kernel32.dll";
+                orig = nullptr;
+                ok = detour::trampoline_try(
+                        dll, "MultiByteToWideChar", MultiByteToWideChar_hook, &orig);
             }
-            if ((kb || k32) && MultiByteToWideChar_orig) {
+            if (ok && orig) {
+                MultiByteToWideChar_orig = orig;
                 log_info("hooks::lang",
-                        "MultiByteToWideChar trampoline installed for legacy IIDX "
-                        "(kernelbase={}, kernel32={})",
-                        kb, k32);
+                        "MultiByteToWideChar trampoline installed for legacy IIDX ({})",
+                        dll);
             } else {
                 log_warning("hooks::lang",
                         "MultiByteToWideChar trampoline failed for legacy IIDX "
@@ -441,20 +435,27 @@ void hooks::lang::init() {
     }
 
     // Fallback trampoline if early_init did not cover this model.
+    // One export only — dual kernel32+kernelbase hooks AV on Win10+ forwarders.
     if (!MultiByteToWideChar_orig) {
-        decltype(MultiByteToWideChar) *orig_kb = nullptr;
-        decltype(MultiByteToWideChar) *orig_k32 = nullptr;
-        detour::trampoline_try(
-                "kernelbase.dll",
-                "MultiByteToWideChar",
-                MultiByteToWideChar_hook,
-                &orig_kb);
-        detour::trampoline_try(
-                "kernel32.dll",
-                "MultiByteToWideChar",
-                MultiByteToWideChar_hook,
-                &orig_k32);
-        MultiByteToWideChar_orig = orig_kb ? orig_kb : orig_k32;
+        decltype(MultiByteToWideChar) *orig = nullptr;
+        if (detour::trampoline_try(
+                    "kernelbase.dll",
+                    "MultiByteToWideChar",
+                    MultiByteToWideChar_hook,
+                    &orig)
+                && orig) {
+            MultiByteToWideChar_orig = orig;
+        } else {
+            orig = nullptr;
+            if (detour::trampoline_try(
+                        "kernel32.dll",
+                        "MultiByteToWideChar",
+                        MultiByteToWideChar_hook,
+                        &orig)
+                    && orig) {
+                MultiByteToWideChar_orig = orig;
+            }
+        }
     }
 }
 
