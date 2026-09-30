@@ -464,6 +464,8 @@ set(SOURCE_FILES ${SOURCE_FILES}
         games/iidx/bi2x_hook.cpp
         games/iidx/ezusb.cpp
         games/iidx/ezusb2.cpp
+        games/iidx/ezusb_serial.cpp
+        games/iidx/security/rp_v1.cpp
         games/iidx/legacy_camera.cpp
         games/iidx/local_camera.cpp
         games/iidx/camera.cpp

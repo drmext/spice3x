@@ -1941,7 +1941,7 @@ int main_implementation(int argc, char *argv[]) {
 
         auto target = launcher::try_detect_jdj();
         if (!target) {
-            log_fatal("launcher", "injected mode requires IIDX 14-17 sidcode.txt next to the game");
+            log_fatal("launcher", "injected mode requires IIDX 9-17 sidcode.txt next to the game");
         }
 
         // GetModuleHandle(NULL) is bm2dx.exe; keep MODULE_PATH on the date folder
@@ -1980,19 +1980,29 @@ int main_implementation(int argc, char *argv[]) {
             // 854x480 backbuffer (Present 1:1). Do not use -windowscale.
             // Outer HWND is larger via deco so the border is not part of 854x480.
             if (!GRAPHICS_WINDOW_SIZE.has_value()
-                    && avs::game::is_model({"GLD", "HDD", "I00", "JDJ"})) {
+                    && avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD",
+                            "GLD", "HDD", "I00", "JDJ"})) {
                 GRAPHICS_WINDOW_SIZE = {854, 480};
                 log_info(
                     "launcher",
-                    "IIDX 14-17 arcade widescreen: client 854x480 with filtered 640→854 "
+                    "IIDX 9-17 arcade widescreen: client 854x480 with filtered 640→854 "
                     "backbuffer scale (override with -windowsize)");
             }
         }
 
-        // Bind already-loaded libavs-win32*.dll imports (static imports of the exe)
-        avs::core::load_dll();
-        avs::ea3::load_dll();
-
+        // 9-12 only ship avs.dll (no property_search / ea3_boot). The game owns
+        // boot; eam3lib is the old eamuse3 client and nicspoof covers services.
+        // DistorteD and later have libavs-win32.dll.
+        const bool skip_avs_dll = avs::game::is_model({"C02", "D01", "E11", "ECO"});
+        if (skip_avs_dll) {
+            log_info("launcher",
+                    "injected {}: skipping avs core/ea3 (avs.dll has no ea3_boot)",
+                    avs::game::MODEL);
+        } else {
+            // Bind already-loaded libavs-win32*.dll imports (static imports of the exe)
+            avs::core::load_dll();
+            avs::ea3::load_dll();
+        }
         // Same network/adapter path as the normal launcher. Game + AVS DLLs are
         // already mapped, so one networkhook_init is enough.
         if (nicspoof_cfg.mode != NicSpoofMode::Off) {
@@ -2011,8 +2021,10 @@ int main_implementation(int argc, char *argv[]) {
             easrv_start(easrv_port, easrv_maint, 4, 8);
         }
 
-        // Game owns ea3_boot; rewrite services/PCBID when it calls in.
-        avs::ea3::hook_injected_boot(easrv_port, easrv_maint, easrv_smart);
+        // Game owns ea3_boot on 13+; rewrite services/PCBID when it calls in.
+        if (!skip_avs_dll) {
+            avs::ea3::hook_injected_boot(easrv_port, easrv_maint, easrv_smart);
+        }
 
         stubs::attach();
 
@@ -2061,7 +2073,7 @@ int main_implementation(int argc, char *argv[]) {
             }
 
 #if !defined(SPICE64)
-            // IIDX 14-17 GOLD/DJT/EMPRESS/Sirius — bm2dx.exe in a date folder named by sidcode.txt
+            // IIDX 9-17 — bm2dx.exe next to sidcode.txt
             if (!cfg_run && !cfg::CONFIGURATOR_STANDALONE) {
                 if (auto jdj = launcher::try_detect_jdj()) {
                     return launcher::exe_inject(*jdj);

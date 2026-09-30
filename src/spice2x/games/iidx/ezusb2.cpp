@@ -7,8 +7,10 @@
 #include "avs/ea3.h"
 #include "avs/game.h"
 #include "external/hash-library/md5.h"
+#include "games/iidx/ezusb_serial.h"
 #include "games/iidx/iidx.h"
 #include "games/iidx/io.h"
+#include "games/iidx/security/rp_v1.h"
 #include "rawinput/rawinput.h"
 #include "util/logging.h"
 #include "util/utils.h"
@@ -46,13 +48,29 @@ enum NodeId : uint8_t {
     NODE_NONE = 0x00,
     NODE_SECURITY_PLUG = 0x01,
     NODE_EEPROM = 0x02,
-    NODE_FPGA_V2 = 0x04,
+    // 0x04 is SERIAL on 9-13 (C02) and FPGA_V2 on GOLD+.
+    NODE_FPGA_V2_OR_SERIAL = 0x04,
     NODE_16SEG = 0x05,
     NODE_COIN = 0x09,
     NODE_WDT = 0x0C,
+    NODE_FPGA_V1 = 0x10,
     NODE_SRAM = 0x40,
     NODE_SECURITY_MEM = 0xFE,
 };
+
+bool is_c02_era() {
+    return avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD"});
+}
+
+bool is_serial_board() {
+    // 9-12 magnetic H8; DistorteD uses COM ICCA instead.
+    return avs::game::is_model({"C02", "D01", "E11", "ECO"});
+}
+
+bool is_d01_board() {
+    // 10-13 use D01 pad bit; 9th is C02.
+    return avs::game::is_model({"D01", "E11", "ECO", "FDD"});
+}
 
 enum DongleSlot : uint8_t {
     SLOT_BLACK = 0x00,
@@ -65,8 +83,13 @@ enum DongleMem : uint8_t {
 };
 
 enum SecPlugCmd : uint8_t {
+    // v1 (9-13) and v2 SEARCH share 0x01; v1 READ_ROM is also 0x01.
+    SECPLUG_V1_READ_ROM = 0x01,
     SECPLUG_SEARCH = 0x01,
     SECPLUG_READ_DATA = 0x02,
+    SECPLUG_V1_WRITE_DATA = 0x03,
+    SECPLUG_V1_SELECT_1 = 0x04,
+    SECPLUG_V1_SELECT_2 = 0x05,
     SECPLUG_READ_ROM = 0x06,
     SECPLUG_SELECT_1 = 0x07,
     SECPLUG_SELECT_2 = 0x08,
@@ -76,6 +99,7 @@ enum SecPlugCmd : uint8_t {
 };
 
 enum SecPlugStatus : uint8_t {
+    SECPLUG_V1_OK = 0x00,
     SECPLUG_SEARCH_OK = 0x12,
     SECPLUG_READ_DATA_OK = 0x13,
     SECPLUG_READ_ROM_OK = 0x15,
@@ -108,12 +132,15 @@ enum Seg16Cmd : uint8_t {
 
 enum FpgaCmd : uint8_t {
     FPGA_INIT = 0x01,
-    FPGA_CHECK = 0x02,
+    FPGA_CHECK = 0x02,       // v2 check; v1 CHECK_2
     FPGA_WRITE = 0x03,
     FPGA_WRITE_DONE = 0x04,
+    FPGA_V1_CHECK = 0xFF,
 };
 
 enum FpgaStatus : uint8_t {
+    FPGA_V1_OK = 0x00,
+    FPGA_V1_OK_2 = 0xFE,
     FPGA_INIT_OK = 0x41,
     FPGA_CHECK_OK = 0x42,
     FPGA_WRITE_OK = 0x43,
@@ -295,8 +322,12 @@ constexpr char kWhiteSignKey[8] = {'E', '-', 'A', 'M', 'U', 'S', 'E', '3'};
 constexpr char kWhiteMcode[8] = {'@', '@', '@', '@', '@', '@', '@', '@'};
 
 // sec.black_plug_mcode. Same 8 bytes bemanitools ships per title.
-// 14 GQGLDJAA, 15 GQHDDJAA, 16 GQI00JAA, 17 GCJDJJAA.
 const char *black_mcode() {
+    if (avs::game::is_model("C02")) return "GEC02JAA";
+    if (avs::game::is_model("D01")) return "GQD01JAA";
+    if (avs::game::is_model("E11")) return "GQE11JAA";
+    if (avs::game::is_model("ECO")) return "GQECOJAA";
+    if (avs::game::is_model("FDD")) return "GQFDDJAA";
     if (avs::game::is_model("GLD")) return "GQGLDJAA";
     if (avs::game::is_model("HDD")) return "GQHDDJAA";
     if (avs::game::is_model("I00")) return "GQI00JAA";
@@ -447,6 +478,29 @@ void encrypt_rom_data(uint8_t *buffer, uint8_t length) {
 
 uint8_t process_secplug(uint8_t cmd, uint8_t detail0) {
     ensure_security_ids();
+    if (is_c02_era()) {
+        // v1: only black dongle; SELECT_1/2 both address black.
+        switch (cmd) {
+            case SECPLUG_V1_READ_ROM:
+                g_dongle_mem = MEM_ROM;
+                g_rom_seed = detail0;
+                g_dongle_slot = SLOT_BLACK;
+                return SECPLUG_V1_OK;
+            case SECPLUG_READ_DATA:
+                g_dongle_mem = MEM_DATA;
+                g_dongle_slot = SLOT_BLACK;
+                return SECPLUG_V1_OK;
+            case SECPLUG_V1_WRITE_DATA:
+                return SECPLUG_V1_OK;
+            case SECPLUG_V1_SELECT_1:
+            case SECPLUG_V1_SELECT_2:
+                g_dongle_slot = SLOT_BLACK;
+                return SECPLUG_V1_OK;
+            default:
+                log_warning("iidx::ezusb2", "unknown secplug v1 cmd {:02x}", cmd);
+                return SECPLUG_FAIL;
+        }
+    }
     switch (cmd) {
         case SECPLUG_SEARCH:
             g_dongle_mem = MEM_ROM;
@@ -491,6 +545,22 @@ bool read_secplug_packet(BulkPacket *pkg) {
 
     pkg->node = 0x12;
     pkg->page = 0x00;
+    if (is_c02_era()) {
+        // Roundplug v1: boot version GEC02 + seeds 0:0:0
+        constexpr char kBootVersion[8] = {'G', 'E', 'C', '0', '2', ' ', ' ', ' '};
+        constexpr uint32_t kBootSeeds[3] = {0, 0, 0};
+        security::RpEeprom eeprom {};
+        uint8_t id_bytes[10];
+        memcpy(id_bytes, &id, sizeof(id_bytes));
+        security::rp_generate_signed_eeprom(
+                kBootVersion, kBootSeeds, black_mcode(), id_bytes, &eeprom);
+        memcpy(pkg->payload, &eeprom, sizeof(eeprom));
+        // Mirror bemanitools: write signature into EEPROM for the game's compare
+        ensure_eeprom();
+        memcpy(g_eeprom + 6, eeprom.signature, 6);
+        return true;
+    }
+
     Rp2Eeprom eeprom {};
     if (black) {
         rp2_signed_eeprom(true, kBlackSignKey, black_mcode(), id, &eeprom);
@@ -523,6 +593,21 @@ uint8_t process_coin(uint8_t cmd) {
 }
 
 uint8_t process_fpga(uint8_t cmd) {
+    if (is_c02_era()) {
+        // FPGA v1 statuses (fpga-cmd.h)
+        switch (cmd) {
+            case FPGA_INIT:
+            case FPGA_CHECK: // CHECK_2
+            case FPGA_WRITE_DONE:
+                return FPGA_V1_OK_2;
+            case FPGA_V1_CHECK:
+            case FPGA_WRITE:
+                return FPGA_V1_OK;
+            default:
+                log_warning("iidx::ezusb2", "unknown fpga v1 cmd {:02x}", cmd);
+                return FPGA_FAULT;
+        }
+    }
     switch (cmd) {
         case FPGA_INIT:
             return FPGA_INIT_OK;
@@ -577,6 +662,7 @@ uint8_t process_wdt(uint8_t cmd) {
 }
 
 bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
+    (void) d1;
     switch (node) {
         case NODE_NONE:
             g_status = 0;
@@ -593,7 +679,18 @@ bool process_node_cmd(uint8_t node, uint8_t cmd, uint8_t d0, uint8_t d1) {
         case NODE_16SEG:
             g_status = (cmd == SEG16_WRITE) ? 0x00 : 0xFE;
             return true;
-        case NODE_FPGA_V2:
+        case NODE_FPGA_V2_OR_SERIAL:
+            if (is_serial_board()) {
+                g_status = ezusb_serial::process_cmd(cmd);
+                return true;
+            }
+            g_status = process_fpga(cmd);
+            return true;
+        case NODE_FPGA_V1:
+            if (!is_c02_era()) {
+                log_warning("iidx::ezusb2", "fpga v1 node on non-C02 model");
+                return false;
+            }
             g_status = process_fpga(cmd);
             return true;
         case NODE_SRAM:
@@ -665,7 +762,13 @@ uint32_t build_iidx_pad() {
     if (g_coin_mode == 1) {
         pad |= (1u << 31);
     }
-    return ~pad;
+
+    // D01 board id: clear inverted pad bit 4 (active-low board flag)
+    uint32_t inverted = ~pad;
+    if (is_d01_board()) {
+        inverted &= ~(1u << 4);
+    }
+    return inverted;
 }
 
 bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
@@ -696,6 +799,14 @@ bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
     msg.fpga2_check_flag_unkn = 2;
     msg.fpga_write_ready = 1;
     msg.serial_io_busy_flag = 0;
+    if (is_serial_board()) {
+        if (ezusb_serial::read_busy()) {
+            msg.serial_io_busy_flag |= (1 << 0);
+        }
+        if (ezusb_serial::write_busy()) {
+            msg.serial_io_busy_flag |= (1 << 1);
+        }
+    }
     msg.sliders[0] = static_cast<uint8_t>((get_slider(1) << 4) | get_slider(0));
     msg.sliders[1] = static_cast<uint8_t>((get_slider(3) << 4) | get_slider(2));
     msg.sliders[2] = get_slider(4);
@@ -771,8 +882,15 @@ bool bulk_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
         }
         case NODE_SECURITY_MEM:
         case NODE_NONE:
-        case NODE_FPGA_V2:
+        case NODE_FPGA_V2_OR_SERIAL:
+        case NODE_FPGA_V1:
         case NODE_WDT:
+            if (is_serial_board() && g_cur_node == NODE_FPGA_V2_OR_SERIAL) {
+                if (!ezusb_serial::read_packet(reinterpret_cast<uint8_t *>(&pkg))) {
+                    return false;
+                }
+                break;
+            }
             // FPGA/security-mem/wdt stub: empty page
             break;
         default:
@@ -817,8 +935,12 @@ bool bulk_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
         case NODE_SECURITY_PLUG:
         case NODE_NONE:
         case NODE_16SEG:
-        case NODE_FPGA_V2:
+        case NODE_FPGA_V2_OR_SERIAL:
+        case NODE_FPGA_V1:
         case NODE_WDT:
+            if (is_serial_board() && pkg.node == NODE_FPGA_V2_OR_SERIAL) {
+                return ezusb_serial::write_packet(reinterpret_cast<const uint8_t *>(&pkg));
+            }
             // accept and discard FPGA firmware / wdt pages
             return true;
         default:
@@ -923,7 +1045,13 @@ int ioctl_pipe_write(LPVOID lpInBuffer, DWORD nInBufferSize,
 } // namespace
 
 bool EZUSB2Handle::open(LPCWSTR lpFileName) {
-    return wcscmp(lpFileName, L"\\\\.\\Ezusb-0") == 0;
+    if (wcscmp(lpFileName, L"\\\\.\\Ezusb-0") != 0) {
+        return false;
+    }
+    if (is_serial_board()) {
+        ezusb_serial::init();
+    }
+    return true;
 }
 
 int EZUSB2Handle::read(LPVOID, DWORD) {

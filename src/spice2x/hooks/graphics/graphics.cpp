@@ -668,9 +668,10 @@ static HWND WINAPI CreateWindowExA_hook(DWORD dwExStyle, LPCSTR lpClassName, LPC
             fmt::ptr(hInstance),
             fmt::ptr(lpParam));
 
-    // IIDX 14-17 create a WS_POPUP window; give it a normal frame under -w
+    // IIDX 9-17 create a WS_POPUP window; give it a normal frame under -w
     // so it matches other IIDX windowed builds. Skip nWidth==0 system windows.
-    if (GRAPHICS_WINDOWED && avs::game::is_model({"GLD", "HDD", "I00", "JDJ"}) && nWidth > 0) {
+    if (GRAPHICS_WINDOWED && avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD",
+            "GLD", "HDD", "I00", "JDJ"}) && nWidth > 0) {
         dwExStyle = 0;
         dwStyle &= ~WS_POPUP;
         dwStyle |= WS_OVERLAPPEDWINDOW;
@@ -1492,7 +1493,7 @@ void graphics_hook_window(HWND hWnd, D3DPRESENT_PARAMETERS *pPresentationParamet
 
     // update window size for a few games
     // TODO: make this work on everything
-    // JDJ/GOLD/DJT/EMPRESS must stay off this list: arcade widescreen keeps
+    // JDJ/GOLD/DJT/EMPRESS and 9-13 must stay off this list: arcade widescreen keeps
     // game drawing at 640x480 (via bb_scale RT) while the client/backbuffer is 854x480.
     if (pPresentationParameters != nullptr && GRAPHICS_WINDOWED
     && (avs::game::is_model({ "K39", "L39", "M39", "JMP", "LDJ" }))) {

@@ -1,0 +1,352 @@
+#include "ezusb_serial.h"
+
+#include <cstring>
+#include <mutex>
+#include <vector>
+
+#include "misc/eamuse.h"
+#include "util/logging.h"
+
+namespace games::iidx::ezusb_serial {
+namespace {
+
+constexpr size_t kPage = 62;
+constexpr size_t kBuf = 512;
+constexpr size_t kHdr = 4; // msg_cmd, node_id, node_cmd, payload_len
+constexpr uint8_t CMD_NODE_REQ = 0x80;
+constexpr uint8_t CMD_NODE_RESP = 0x81;
+constexpr uint8_t CMD_H8_REQ = 0xAA;
+constexpr uint8_t CMD_H8_RESP = 0xA5;
+constexpr uint8_t H8_NODE_ENUM = 0x01;
+constexpr uint8_t H8_GET_VERSION = 0x02;
+constexpr uint8_t H8_PROG_EXEC = 0x03;
+constexpr uint8_t NODE_CARD_INIT = 0x00;
+constexpr uint8_t NODE_KEYBOARD_INIT = 0x10;
+constexpr uint8_t NODE_CARD_RW_STATUS = 0x12;
+constexpr uint8_t NODE_CARD_SLOT_STATE = 0x14;
+constexpr uint8_t NODE_CARD_WRITE = 0x16;
+constexpr uint8_t NODE_CARD_READ = 0x18;
+constexpr uint8_t NODE_CARD_FORMAT_DONE = 0x1E;
+constexpr uint8_t NODE_CARD_GET_STATUS = 0x20;
+constexpr uint8_t NODE_KEYBOARD_GET_STATUS = 0x24;
+constexpr uint8_t NODE_KEYBOARD_READ = 0x26;
+constexpr uint8_t NODE_KEYBOARD_BUF_SIZE = 0x27;
+constexpr uint8_t SERIAL_OK = 0x00;
+constexpr uint8_t SERIAL_FAULT = 0xFE;
+
+#pragma pack(push, 1)
+struct SerialMsg {
+    uint8_t msg_cmd;
+    uint8_t node_id;
+    uint8_t node_cmd;
+    uint8_t payload_len;
+    uint8_t payload[255];
+};
+#pragma pack(pop)
+
+std::mutex g_mu;
+bool g_read_busy = false;
+bool g_write_busy = false;
+uint8_t g_read_buf[kBuf] {};
+uint8_t g_write_buf[kBuf] {};
+uint16_t g_read_len = 0;
+uint16_t g_write_len = 0;
+uint8_t g_read_page = 0;
+uint8_t g_write_page = 0;
+
+struct Slot {
+    bool card_present = false;
+    uint8_t card_id[8] {};
+    uint8_t keypad_code = 0;
+    uint16_t last_keypad = 0;
+};
+Slot g_slot[2] {};
+
+uint8_t checksum(const uint8_t *data, uint16_t len) {
+    uint8_t sum = 0;
+    for (uint16_t i = 0; i < len; i++) {
+        sum += data[i];
+    }
+    return sum;
+}
+
+void poll_slot(uint8_t node) {
+    if (node < 1 || node > 2) {
+        return;
+    }
+    Slot &s = g_slot[node - 1];
+    const size_t unit = node - 1;
+
+    // Card insert edge from spice overlay / file
+    if (eamuse_card_insert_consume(2, static_cast<int>(unit))) {
+        if (eamuse_get_card(2, static_cast<int>(unit), s.card_id)) {
+            s.card_present = true;
+        }
+    }
+
+    const uint16_t kp = eamuse_get_keypad_state(unit);
+    const uint16_t rise = kp & (s.last_keypad ^ kp);
+    s.last_keypad = kp;
+    if (rise) {
+        // Lowest set bit index as a simple scan code for the H8 path
+        for (uint8_t i = 0; i < 16; i++) {
+            if (rise & (1u << i)) {
+                s.keypad_code = static_cast<uint8_t>(0x80 | i);
+                break;
+            }
+        }
+    }
+}
+
+void build_resp(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
+        uint8_t node_cmd, const uint8_t *payload, uint8_t payload_len) {
+    out.clear();
+    out.push_back(msg_cmd);
+    out.push_back(node_id);
+    out.push_back(node_cmd);
+    out.push_back(payload_len);
+    for (uint8_t i = 0; i < payload_len; i++) {
+        out.push_back(payload[i]);
+    }
+    out.push_back(checksum(out.data(), static_cast<uint16_t>(out.size())));
+}
+
+bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out) {
+    if (in_len < kHdr) {
+        return false;
+    }
+
+    if (in->msg_cmd == CMD_H8_REQ) {
+        if (in->node_cmd == H8_NODE_ENUM) {
+            const uint8_t total = 2;
+            build_resp(out, CMD_H8_RESP, 0, in->node_cmd, &total, 1);
+            return true;
+        }
+        if (in->node_cmd == H8_GET_VERSION) {
+            uint8_t ver[13] = {0x03, 0x00, 1, 6, 0, 'I', 'C', 'C', 'A', 0};
+            build_resp(out, CMD_H8_RESP, in->node_id, in->node_cmd, ver, 5);
+            return true;
+        }
+        if (in->node_cmd == H8_PROG_EXEC) {
+            const uint8_t st = 0;
+            build_resp(out, CMD_H8_RESP, in->node_id, in->node_cmd, &st, 1);
+            return true;
+        }
+        log_warning("iidx::serial", "unknown H8 cmd {:02x}", in->node_cmd);
+        return false;
+    }
+
+    if (in->msg_cmd != CMD_NODE_REQ) {
+        log_warning("iidx::serial", "unknown msg_cmd {:02x}", in->msg_cmd);
+        return false;
+    }
+
+    poll_slot(in->node_id);
+    const uint8_t node = in->node_id;
+    Slot *slot = (node >= 1 && node <= 2) ? &g_slot[node - 1] : nullptr;
+
+    switch (in->node_cmd) {
+        case NODE_CARD_INIT:
+        case NODE_KEYBOARD_INIT:
+        case NODE_CARD_GET_STATUS:
+        case NODE_KEYBOARD_GET_STATUS:
+        case NODE_CARD_FORMAT_DONE:
+        case NODE_CARD_WRITE: {
+            const uint8_t st = 0;
+            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+            return true;
+        }
+        case NODE_CARD_RW_STATUS: {
+            uint8_t st = 0;
+            if (slot && slot->card_present) {
+                st = static_cast<uint8_t>(128 | 2); // back sensor + present
+            }
+            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+            return true;
+        }
+        case NODE_CARD_SLOT_STATE: {
+            if (slot && in->payload_len >= 1) {
+                const uint8_t state = in->payload[0];
+                if (state == 2 /* eject */ || state == 0 /* close */) {
+                    slot->card_present = false;
+                }
+            }
+            const uint8_t st = 0;
+            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+            return true;
+        }
+        case NODE_CARD_READ: {
+            uint8_t data[1 + 128] {};
+            data[0] = 0; // status
+            if (slot && slot->card_present) {
+                // Mag card layout used by bemanitools: inverted id bytes
+                uint8_t inv[8];
+                for (int i = 0; i < 8; i++) {
+                    inv[i] = static_cast<uint8_t>(~slot->card_id[i]);
+                }
+                memcpy(&data[1], inv, 8);
+            }
+            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, data,
+                    static_cast<uint8_t>(1 + 128));
+            return true;
+        }
+        case NODE_KEYBOARD_BUF_SIZE: {
+            uint8_t payload[2] = {0, 0};
+            if (slot && slot->keypad_code != 0) {
+                payload[1] = 1; // size type 1 = one byte ready
+            }
+            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, payload, 2);
+            return true;
+        }
+        case NODE_KEYBOARD_READ: {
+            uint8_t size_type = in->payload_len >= 1 ? in->payload[0] : 0;
+            uint8_t payload[2] = {0, 0};
+            if (size_type >= 1 && slot && slot->keypad_code != 0) {
+                payload[0] = 0;
+                payload[1] = slot->keypad_code;
+                slot->keypad_code = 0;
+                build_resp(out, CMD_NODE_RESP, node, in->node_cmd, payload, 2);
+            } else {
+                build_resp(out, CMD_NODE_RESP, node, in->node_cmd, payload, 1);
+            }
+            return true;
+        }
+        default:
+            log_warning("iidx::serial", "unknown node cmd {:02x}", in->node_cmd);
+            const uint8_t st = 0;
+            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+            return true;
+    }
+}
+
+void exec_write_buf() {
+    if (g_write_len < kHdr) {
+        g_write_len = 0;
+        return;
+    }
+    auto *msg = reinterpret_cast<const SerialMsg *>(g_write_buf);
+    std::vector<uint8_t> resp;
+    if (!handle_msg(msg, g_write_len, resp) || resp.empty()) {
+        g_write_len = 0;
+        return;
+    }
+    if (resp.size() > kBuf) {
+        log_warning("iidx::serial", "response too large {}", resp.size());
+        g_write_len = 0;
+        return;
+    }
+    memcpy(g_read_buf, resp.data(), resp.size());
+    g_read_len = static_cast<uint16_t>(resp.size());
+    g_read_page = 0;
+    g_read_busy = true;
+    g_write_len = 0;
+}
+
+} // namespace
+
+void init() {
+    std::lock_guard lock(g_mu);
+    g_read_busy = false;
+    g_write_busy = false;
+    g_read_len = 0;
+    g_write_len = 0;
+    g_read_page = 0;
+    g_write_page = 0;
+    memset(g_read_buf, 0, sizeof(g_read_buf));
+    memset(g_write_buf, 0, sizeof(g_write_buf));
+    g_slot[0] = {};
+    g_slot[1] = {};
+}
+
+uint8_t process_cmd(uint8_t cmd) {
+    std::lock_guard lock(g_mu);
+    switch (cmd) {
+        case 0x02: // READ_BUFFER
+            g_read_busy = false;
+            g_read_page = 0;
+            return SERIAL_OK;
+        case 0x03: // WRITE_BUFFER
+            g_write_busy = false;
+            g_write_page = 0;
+            return SERIAL_OK;
+        case 0x04: // CLEAR_READ
+            g_read_busy = false;
+            g_read_page = 0;
+            g_read_len = 0;
+            return SERIAL_OK;
+        case 0x05: // CLEAR_WRITE
+            g_write_busy = false;
+            g_write_page = 0;
+            g_write_len = 0;
+            return SERIAL_OK;
+        default:
+            log_warning("iidx::serial", "unknown serial cmd {:02x}", cmd);
+            return SERIAL_FAULT;
+    }
+}
+
+bool read_packet(uint8_t *pkg60) {
+    std::lock_guard lock(g_mu);
+    // BulkPacket: node, page, payload[60]
+    pkg60[0] = 0x42;
+    pkg60[1] = g_read_page;
+    memset(pkg60 + 2, 0xFF, kPage);
+
+    const uint16_t offset = static_cast<uint16_t>(g_read_page * kPage);
+    uint16_t data_length = 0;
+    if (g_read_len >= kPage) {
+        data_length = kPage;
+        g_read_len = static_cast<uint16_t>(g_read_len - kPage);
+        g_read_page++;
+    } else {
+        data_length = g_read_len;
+        pkg60[1] = static_cast<uint8_t>(0x40 + data_length);
+        g_read_len = 0;
+    }
+    if (data_length) {
+        memcpy(pkg60 + 2, g_read_buf + offset, data_length);
+    }
+    return true;
+}
+
+bool write_packet(const uint8_t *pkg60) {
+    std::lock_guard lock(g_mu);
+    const uint8_t page = pkg60[1];
+    const uint8_t *payload = pkg60 + 2;
+    bool execute = false;
+    uint16_t data_length = 0;
+    const uint16_t offset = static_cast<uint16_t>(g_write_page * kPage);
+
+    if (page >= 0x42) {
+        data_length = static_cast<uint16_t>(page - 0x42);
+        execute = true;
+    } else {
+        data_length = kPage;
+        g_write_page++;
+    }
+
+    if (offset + data_length > kBuf) {
+        log_warning("iidx::serial", "write buffer overrun");
+        return false;
+    }
+    memcpy(g_write_buf + offset, payload, data_length);
+    g_write_len = static_cast<uint16_t>(g_write_len + data_length);
+
+    if (execute) {
+        exec_write_buf();
+        g_write_page = 0;
+    }
+    return true;
+}
+
+bool read_busy() {
+    std::lock_guard lock(g_mu);
+    return g_read_busy;
+}
+
+bool write_busy() {
+    std::lock_guard lock(g_mu);
+    return g_write_busy;
+}
+
+} // namespace games::iidx::ezusb_serial

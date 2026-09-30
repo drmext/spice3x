@@ -650,7 +650,12 @@ int eamuse_get_game_keypads_name() {
 void eamuse_autodetect_game() {
     if (avs::game::is_model("KFC"))
         eamuse_set_game("Sound Voltex");
-    else if (avs::game::is_model("GLD") ||
+    else if (avs::game::is_model("C02") ||
+             avs::game::is_model("D01") ||
+             avs::game::is_model("E11") ||
+             avs::game::is_model("ECO") ||
+             avs::game::is_model("FDD") ||
+             avs::game::is_model("GLD") ||
              avs::game::is_model("HDD") ||
              avs::game::is_model("I00") ||
              avs::game::is_model("JDJ") ||

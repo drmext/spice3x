@@ -93,7 +93,8 @@ namespace launcher {
             return std::nullopt;
         }
 
-        // model:dest:spec:rev:ext
+        // 5-field: model:dest:spec:rev:ext (14-17 date folder)
+        // 4-field: model:dest:spec:rev (9-13 JA* folder; ext = folder with bm2dx.exe)
         std::vector<std::string> fields;
         size_t start = 0;
         while (start <= text.size()) {
@@ -105,8 +106,8 @@ namespace launcher {
             fields.push_back(text.substr(start, pos - start));
             start = pos + 1;
         }
-        if (fields.size() != 5) {
-            log_warning("exe-inject", "sidcode.txt has {} fields, expected 5: {}",
+        if (fields.size() != 4 && fields.size() != 5) {
+            log_warning("exe-inject", "sidcode.txt has {} fields, expected 4 or 5: {}",
                     fields.size(), text);
             return std::nullopt;
         }
@@ -116,14 +117,59 @@ namespace launcher {
         target.dest = fields[1];
         target.spec = fields[2];
         target.rev = fields[3];
-        target.ext = fields[4];
         target.sidcode_dir = sidcode_path.parent_path();
-        target.work_dir = target.sidcode_dir / target.ext;
+
+        if (fields.size() == 5) {
+            target.ext = fields[4];
+            target.work_dir = target.sidcode_dir / target.ext;
+            target.exe_path = target.work_dir / "bm2dx.exe";
+            return target;
+        }
+
+        // 9-13: find the unique child folder that contains bm2dx.exe
+        std::error_code ec;
+        std::optional<std::filesystem::path> found;
+        for (const auto &entry : std::filesystem::directory_iterator(target.sidcode_dir, ec)) {
+            if (ec || !entry.is_directory()) {
+                continue;
+            }
+            auto exe = entry.path() / "bm2dx.exe";
+            if (fileutils::file_exists(exe)) {
+                if (found) {
+                    log_warning("exe-inject",
+                            "multiple bm2dx.exe under {}; pick one folder",
+                            target.sidcode_dir.string());
+                    return std::nullopt;
+                }
+                found = entry.path();
+            }
+        }
+        if (!found) {
+            log_warning("exe-inject", "no bm2dx.exe under {}", target.sidcode_dir.string());
+            return std::nullopt;
+        }
+        target.work_dir = *found;
+        target.ext = found->filename().string();
         target.exe_path = target.work_dir / "bm2dx.exe";
         return target;
     }
 
-    static const char *io2_style_name(const std::string &model) {
+    static const char *inject_style_name(const std::string &model) {
+        if (_stricmp(model.c_str(), "C02") == 0) {
+            return "IIDX 9th Style";
+        }
+        if (_stricmp(model.c_str(), "D01") == 0) {
+            return "IIDX 10th Style";
+        }
+        if (_stricmp(model.c_str(), "E11") == 0) {
+            return "IIDX 11 RED";
+        }
+        if (_stricmp(model.c_str(), "ECO") == 0) {
+            return "IIDX 12 Happy Sky";
+        }
+        if (_stricmp(model.c_str(), "FDD") == 0) {
+            return "IIDX 13 DistorteD";
+        }
         if (_stricmp(model.c_str(), "GLD") == 0) {
             return "IIDX 14 GOLD";
         }
@@ -139,13 +185,13 @@ namespace launcher {
         return nullptr;
     }
 
-    static bool is_io2_inject_model(const std::string &model) {
-        return io2_style_name(model) != nullptr;
+    static bool is_inject_model(const std::string &model) {
+        return inject_style_name(model) != nullptr;
     }
 
     std::optional<ExeGameTarget> try_detect_jdj() {
         // Prefer sidcode next to spice.exe; also try parent when spice lives
-        // inside the date folder (e.g. JDJ\2010071200\spice.exe).
+        // inside the date/JA* folder (e.g. JDJ\2010071200\spice.exe).
         std::vector<std::filesystem::path> candidates;
         std::error_code cwd_error;
         auto cwd = std::filesystem::current_path(cwd_error);
@@ -161,20 +207,20 @@ namespace launcher {
             if (!target) {
                 continue;
             }
-            if (!is_io2_inject_model(target->model)) {
-                log_misc("exe-inject", "sidcode model {} is not IIDX 14-17, ignoring",
+            if (!is_inject_model(target->model)) {
+                log_misc("exe-inject", "sidcode model {} is not IIDX 9-17, ignoring",
                         target->model);
                 continue;
             }
             if (!fileutils::file_exists(target->exe_path)) {
                 log_warning("exe-inject",
                         "{} sidcode points at missing exe: {}",
-                        io2_style_name(target->model),
+                        inject_style_name(target->model),
                         target->exe_path.string());
                 continue;
             }
             log_info("exe-inject", "detected {} ({}) at {}",
-                    io2_style_name(target->model),
+                    inject_style_name(target->model),
                     target->model,
                     target->exe_path.string());
             return target;

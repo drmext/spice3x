@@ -228,7 +228,10 @@ SOCKET alloc_icmp_socket() {
     std::lock_guard<std::recursive_mutex> lock(g_mu);
     for (;;) {
         uint32_t x = g_seq.fetch_add(1, std::memory_order_relaxed);
-        SOCKET s = (SOCKET)(socket_uint)(0xE0000000u | (x & 0x0FFFFFFFu));
+        // Keep the fake handle positive as a signed int32. GOLD's old AVS
+        // keepalive does `test ebx, ebx` / `jl fail` after socket() and
+        // treats 0xE0000000+ as "failed to create raw socket".
+        SOCKET s = (SOCKET)(socket_uint)(0x60000000u | (x & 0x0FFFFFFFu));
         if (s == INVALID_SOCKET) {
             continue;
         }

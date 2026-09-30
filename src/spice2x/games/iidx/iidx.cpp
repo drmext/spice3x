@@ -35,6 +35,8 @@
 #include "util/utils.h"
 #include "launcher/signal.h"
 
+#include <windows.h>
+
 #include "external/robin_hood.h"
 
 #include "bi2a.h"
@@ -331,6 +333,34 @@ namespace games::iidx {
         }
     }
 
+    // RtEffect analog EQ stubs (bemanitools effector.c). Real audio is DirectSound.
+    static BOOL WINAPI EnableEqualizer_hook(int) { return TRUE; }
+    static BOOL WINAPI GetEqualizerStatus_hook(LPVOID) { return TRUE; }
+    static BOOL WINAPI SetEqualizerGain_hook(int, int) { return TRUE; }
+    static BOOL WINAPI SetGlobalEnvironment_hook(int) { return TRUE; }
+    static BOOL WINAPI SetSpeakerMode_hook(int, int) { return TRUE; }
+
+    static void stub_rteffect(HMODULE module) {
+        detour::iat_try("EnableEqualizer", EnableEqualizer_hook, module);
+        detour::iat_try("GetEqualizerStatus", GetEqualizerStatus_hook, module);
+        detour::iat_try("SetEqualizerGain", SetEqualizerGain_hook, module);
+        detour::iat_try("SetGlobalEnvironment", SetGlobalEnvironment_hook, module);
+        detour::iat_try("SetSpeakerMode", SetSpeakerMode_hook, module);
+        log_info("iidx", "RtEffect equalizer exports stubbed");
+    }
+
+    // Operator menu clock save must not change the Windows clock (iidxhook clock.c).
+    static BOOL WINAPI SetLocalTime_hook(const SYSTEMTIME *) {
+        log_misc("iidx", "blocked SetLocalTime (operator clock)");
+        return TRUE;
+    }
+
+    static void block_operator_clock(HMODULE module) {
+        if (detour::iat_try("SetLocalTime", SetLocalTime_hook, module)) {
+            log_info("iidx", "SetLocalTime blocked for operator clock");
+        }
+    }
+
     IIDXGame::IIDXGame() : Game("Beatmania IIDX") {
         logger::hook_add(log_hook, this);
     }
@@ -348,8 +378,11 @@ namespace games::iidx {
             // reduce boot wait time
             hooks::sleep::init(1000, 1);
 
-            const bool is_io2_inject = avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
-            const bool is_jdj = avs::game::is_model("JDJ");
+            const bool is_c02_era = avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD"});
+            const bool is_io2_inject = is_c02_era
+                    || avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
+            const bool is_2235_desc = is_c02_era || avs::game::is_model("JDJ");
+            const bool use_com_icca = avs::game::is_model({"FDD", "JDJ"});
 
             // EZ-USB setupapi entry (same GUID for 2235 and FX2 generations)
             SETUPAPI_SETTINGS settings1 {};
@@ -357,12 +390,12 @@ namespace games::iidx {
             settings1.class_guid[1] = 0x11D47F6A;
             settings1.class_guid[2] = 0x0100DD97;
             settings1.class_guid[3] = 0x59B92902;
-            // Sirius uses ezusb.sys + 2235 description; GOLD-EMPRESS use FX2LP;
+            // 9-13 and Sirius: 2235 description; GOLD-EMPRESS: FX2LP string;
             // later DLL titles use the FX2LP string without the paren after 2235.
             const char property1_old[] = "Cypress EZ-USB (2235 - EEPROM missing)";
-            const char property1_sirius[] = "Cypress EZ-USB (2235) - EEPROM missing";
+            const char property1_2235[] = "Cypress EZ-USB (2235) - EEPROM missing";
             const char property1_fx2lp[] = "Cypress EZ-USB FX2LP - EEPROM missing";
-            const char *property1 = is_jdj ? property1_sirius
+            const char *property1 = is_2235_desc ? property1_2235
                     : (is_io2_inject ? property1_fx2lp : property1_old);
             const char interface_detail1[] = "\\\\.\\Ezusb-0";
             memcpy(settings1.property_devicedesc, property1, strlen(property1) + 1);
@@ -376,13 +409,21 @@ namespace games::iidx {
             }
             devicehook_init();
             if (is_io2_inject) {
-                // GOLD-Sirius: ezusb.sys ioctls, ezusb-iidx v2 packets, round-plug v2
+                // 9-17: ezusb.sys ioctls + 16-byte Anchor packets (v1 or v2 nodes)
                 devicehook_add(new EZUSB2Handle());
-                // Two ICCA nodes on COM1; legacy framing for old libacio
-                devicehook_add(new acioemu::ACIOHandle(L"COM1", 2, true));
+                if (use_com_icca) {
+                    // DistorteD and Sirius: two ICCA nodes on COM1; legacy framing
+                    devicehook_add(new acioemu::ACIOHandle(L"COM1", 2, true));
+                }
                 // Patch the exe IAT after threads resume (PEB walk skips it)
                 devicehook_init_module(avs::game::DLL_INSTANCE);
-                jdj_hook_icca_keepalive(avs::game::DLL_INSTANCE);
+                if (use_com_icca) {
+                    jdj_hook_icca_keepalive(avs::game::DLL_INSTANCE);
+                }
+                if (is_c02_era) {
+                    block_operator_clock(avs::game::DLL_INSTANCE);
+                    stub_rteffect(avs::game::DLL_INSTANCE);
+                }
             } else {
                 // IIDX <25 with EZUSB input device
                 devicehook_add(new EZUSBHandle());
