@@ -13,6 +13,7 @@ namespace {
 constexpr size_t kPage = 62;
 constexpr size_t kBuf = 512;
 constexpr size_t kHdr = 4; // msg_cmd, node_id, node_cmd, payload_len
+constexpr uint8_t HEADER_BYTE = 0xAA;
 constexpr uint8_t CMD_NODE_REQ = 0x80;
 constexpr uint8_t CMD_NODE_RESP = 0x81;
 constexpr uint8_t CMD_H8_REQ = 0xAA;
@@ -98,17 +99,25 @@ void poll_slot(uint8_t node) {
     }
 }
 
-void build_resp(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
-        uint8_t node_cmd, const uint8_t *payload, uint8_t payload_len) {
+// Inner SerialMsg only (no 0xAA frame, no trailing checksum).
+// payload_bytes may exceed payload_len_field (GET_VERSION quirk in ezusb).
+void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
+        uint8_t node_cmd, uint8_t payload_len_field,
+        const uint8_t *payload, uint8_t payload_bytes) {
     out.clear();
     out.push_back(msg_cmd);
     out.push_back(node_id);
     out.push_back(node_cmd);
-    out.push_back(payload_len);
-    for (uint8_t i = 0; i < payload_len; i++) {
+    out.push_back(payload_len_field);
+    for (uint8_t i = 0; i < payload_bytes; i++) {
         out.push_back(payload[i]);
     }
-    out.push_back(checksum(out.data(), static_cast<uint16_t>(out.size())));
+}
+
+void build_status(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
+        uint8_t node_cmd) {
+    const uint8_t st = 0;
+    build_inner(out, msg_cmd, node_id, node_cmd, 1, &st, 1);
 }
 
 bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out) {
@@ -119,17 +128,23 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
     if (in->msg_cmd == CMD_H8_REQ) {
         if (in->node_cmd == H8_NODE_ENUM) {
             const uint8_t total = 2;
-            build_resp(out, CMD_H8_RESP, 0, in->node_cmd, &total, 1);
+            build_inner(out, CMD_H8_RESP, 0, in->node_cmd, 1, &total, 1);
             return true;
         }
         if (in->node_cmd == H8_GET_VERSION) {
-            uint8_t ver[13] = {0x03, 0x00, 1, 6, 0, 'I', 'C', 'C', 'A', 0};
-            build_resp(out, CMD_H8_RESP, in->node_id, in->node_cmd, ver, 5);
+            // payload_len field is 5, but the body is the full 13-byte struct
+            // (uint32 type, dup, maj/min/rev, comment[5]) — bemanitools match.
+            uint8_t ver[13] = {
+                    0x03, 0x00, 0x00, 0x00,
+                    0x00,
+                    1, 6, 0,
+                    'I', 'C', 'C', 'A', 0,
+            };
+            build_inner(out, CMD_H8_RESP, in->node_id, in->node_cmd, 5, ver, 13);
             return true;
         }
         if (in->node_cmd == H8_PROG_EXEC) {
-            const uint8_t st = 0;
-            build_resp(out, CMD_H8_RESP, in->node_id, in->node_cmd, &st, 1);
+            build_status(out, CMD_H8_RESP, in->node_id, in->node_cmd);
             return true;
         }
         log_warning("iidx::serial", "unknown H8 cmd {:02x}", in->node_cmd);
@@ -151,17 +166,15 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         case NODE_CARD_GET_STATUS:
         case NODE_KEYBOARD_GET_STATUS:
         case NODE_CARD_FORMAT_DONE:
-        case NODE_CARD_WRITE: {
-            const uint8_t st = 0;
-            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+        case NODE_CARD_WRITE:
+            build_status(out, CMD_NODE_RESP, node, in->node_cmd);
             return true;
-        }
         case NODE_CARD_RW_STATUS: {
             uint8_t st = 0;
             if (slot && slot->card_present) {
                 st = static_cast<uint8_t>(128 | 2); // back sensor + present
             }
-            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+            build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 1, &st, 1);
             return true;
         }
         case NODE_CARD_SLOT_STATE: {
@@ -171,8 +184,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
                     slot->card_present = false;
                 }
             }
-            const uint8_t st = 0;
-            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+            build_status(out, CMD_NODE_RESP, node, in->node_cmd);
             return true;
         }
         case NODE_CARD_READ: {
@@ -186,8 +198,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
                 }
                 memcpy(&data[1], inv, 8);
             }
-            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, data,
-                    static_cast<uint8_t>(1 + 128));
+            build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 129, data, 129);
             return true;
         }
         case NODE_KEYBOARD_BUF_SIZE: {
@@ -195,7 +206,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
             if (slot && slot->keypad_code != 0) {
                 payload[1] = 1; // size type 1 = one byte ready
             }
-            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, payload, 2);
+            build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 2, payload, 2);
             return true;
         }
         case NODE_KEYBOARD_READ: {
@@ -205,41 +216,94 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
                 payload[0] = 0;
                 payload[1] = slot->keypad_code;
                 slot->keypad_code = 0;
-                build_resp(out, CMD_NODE_RESP, node, in->node_cmd, payload, 2);
+                build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 2, payload, 2);
             } else {
-                build_resp(out, CMD_NODE_RESP, node, in->node_cmd, payload, 1);
+                build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 1, payload, 1);
             }
             return true;
         }
         default:
             log_warning("iidx::serial", "unknown node cmd {:02x}", in->node_cmd);
-            const uint8_t st = 0;
-            build_resp(out, CMD_NODE_RESP, node, in->node_cmd, &st, 1);
+            build_status(out, CMD_NODE_RESP, node, in->node_cmd);
             return true;
     }
 }
 
-void exec_write_buf() {
-    if (g_write_len < kHdr) {
+void set_read_buf(const uint8_t *data, size_t len) {
+    if (len > kBuf) {
+        log_warning("iidx::serial", "response too large {}", len);
         g_write_len = 0;
         return;
     }
-    auto *msg = reinterpret_cast<const SerialMsg *>(g_write_buf);
-    std::vector<uint8_t> resp;
-    if (!handle_msg(msg, g_write_len, resp) || resp.empty()) {
-        g_write_len = 0;
-        return;
-    }
-    if (resp.size() > kBuf) {
-        log_warning("iidx::serial", "response too large {}", resp.size());
-        g_write_len = 0;
-        return;
-    }
-    memcpy(g_read_buf, resp.data(), resp.size());
-    g_read_len = static_cast<uint16_t>(resp.size());
+    memcpy(g_read_buf, data, len);
+    g_read_len = static_cast<uint16_t>(len);
     g_read_page = 0;
     g_read_busy = true;
     g_write_len = 0;
+}
+
+void exec_write_buf() {
+    if (g_write_len == 0) {
+        return;
+    }
+
+    // Match bemanitools: echo null-prefixed trash, and the short uart init
+    // that is four bytes starting with 0xAA, unchanged.
+    if (g_write_buf[0] == 0x00
+            || (g_write_len == 4 && g_write_buf[0] == HEADER_BYTE)) {
+        set_read_buf(g_write_buf, g_write_len);
+        return;
+    }
+
+    if (g_write_buf[0] != HEADER_BYTE) {
+        log_warning("iidx::serial", "frame missing 0xAA header");
+        g_write_len = 0;
+        return;
+    }
+    if (g_write_len < 3) {
+        g_write_len = 0;
+        return;
+    }
+    if (g_write_buf[g_write_len - 1]
+            != checksum(g_write_buf + 1, static_cast<uint16_t>(g_write_len - 2))) {
+        log_warning("iidx::serial", "invalid serial checksum");
+        g_write_len = 0;
+        return;
+    }
+
+    const uint8_t *msg_buf = g_write_buf + 1;
+    const uint16_t msg_len = static_cast<uint16_t>(g_write_len - 2);
+
+    // UART reset: echo AA AA with framing
+    if (msg_len == 2 && msg_buf[0] == HEADER_BYTE && msg_buf[1] == HEADER_BYTE) {
+        uint8_t frame[4] = {HEADER_BYTE, HEADER_BYTE, HEADER_BYTE, 0};
+        frame[3] = checksum(frame + 1, 2);
+        set_read_buf(frame, 4);
+        return;
+    }
+
+    auto *msg = reinterpret_cast<const SerialMsg *>(msg_buf);
+    std::vector<uint8_t> inner;
+    if (!handle_msg(msg, msg_len, inner) || inner.empty()) {
+        g_write_len = 0;
+        return;
+    }
+
+    std::vector<uint8_t> frame;
+    if (msg->msg_cmd == CMD_H8_REQ && msg->node_cmd == H8_NODE_ENUM) {
+        // Node enum: response only (no request echo)
+        frame.push_back(HEADER_BYTE);
+        frame.insert(frame.end(), inner.begin(), inner.end());
+        frame.push_back(checksum(inner.data(), static_cast<uint16_t>(inner.size())));
+    } else {
+        // Everything else: request echo, then framed response
+        frame.insert(frame.end(), g_write_buf, g_write_buf + g_write_len);
+        frame.push_back(HEADER_BYTE);
+        frame.insert(frame.end(), inner.begin(), inner.end());
+        frame.push_back(checksum(inner.data(), static_cast<uint16_t>(inner.size())));
+    }
+
+    set_read_buf(frame.data(), frame.size());
 }
 
 } // namespace
@@ -287,7 +351,7 @@ uint8_t process_cmd(uint8_t cmd) {
 
 bool read_packet(uint8_t *pkg60) {
     std::lock_guard lock(g_mu);
-    // BulkPacket: node, page, payload[60]
+    // BulkPacket: node, page, payload[62]
     pkg60[0] = 0x42;
     pkg60[1] = g_read_page;
     memset(pkg60 + 2, 0xFF, kPage);

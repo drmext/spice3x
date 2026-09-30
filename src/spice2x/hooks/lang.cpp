@@ -376,33 +376,6 @@ void hooks::lang::early_init() {
 
 #endif
 
-    // IIDX 9-13: avs.dll (and the exe) convert Shift-JIS via CP_ACP / locale APIs.
-    // Trampoline so statically imported avs.dll is covered, not only bm2dx.exe IAT.
-    const bool is_c02_era = avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD"});
-    if (is_c02_era) {
-        log_info("hooks::lang", "hooking MultiByteToWideChar / WideCharToMultiByte / GetLocaleInfo for IIDX 9-13");
-        detour::trampoline_try(
-            "kernel32.dll",
-            "MultiByteToWideChar",
-            MultiByteToWideChar_hook,
-            &MultiByteToWideChar_orig);
-        detour::trampoline_try(
-            "kernel32.dll",
-            "WideCharToMultiByte",
-            WideCharToMultiByte_hook,
-            &WideCharToMultiByte_orig);
-        detour::trampoline_try(
-            "kernel32.dll",
-            "GetLocaleInfoA",
-            GetLocaleInfoA_hook,
-            &GetLocaleInfoA_orig);
-        detour::trampoline_try(
-            "kernel32.dll",
-            "GetLocaleInfoW",
-            GetLocaleInfoW_hook,
-            &GetLocaleInfoW_orig);
-    }
-
 #ifdef SPICE64
     // NDD renders through GetTextExtentPoint32A, so its wide strings go back through CP_ACP first
     const auto hook_wide_char_to_multi_byte =

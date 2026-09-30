@@ -382,7 +382,7 @@ namespace games::iidx {
             const bool is_io2_inject = is_c02_era
                     || avs::game::is_model({"GLD", "HDD", "I00", "JDJ"});
             const bool is_2235_desc = is_c02_era || avs::game::is_model("JDJ");
-            const bool use_com_icca = avs::game::is_model({"FDD", "JDJ"});
+            const bool use_com_icca = avs::game::is_model({"FDD", "GLD", "HDD", "I00", "JDJ"});
 
             // EZ-USB setupapi entry (same GUID for 2235 and FX2 generations)
             SETUPAPI_SETTINGS settings1 {};
@@ -405,10 +405,10 @@ namespace games::iidx {
 
             if (is_io2_inject) {
                 // Settings, backup and avs_conf live on d:\, e:\ and f:\.
-                // avs.dll DllMain opens e:\avs00000.bin before this runs; the
-                // injector hooks NtCreateFile first. This IAT remap covers
-                // later CreateFile calls. Do not trampoline all of kernel32:
-                // that re-enters CloseHandle/ReadFile and pins the process.
+                // IAT CreateFile/CreateDirectory remap covers later opens.
+                // avs.dll DllMain still writes e:\avs00000.bin before this.
+                // Do not trampoline all of kernel32: that re-enters
+                // CloseHandle/ReadFile and pins the process.
                 hooks::device::REMAP_SETTINGS_DRIVES = true;
             }
             devicehook_init();

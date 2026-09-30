@@ -27,8 +27,8 @@ namespace avs {
     static ssl_protocol_fini_t ssl_protocol_fini = nullptr;
 
     // functions
-    AVS_EA3_BOOT_STARTUP_T avs_ea3_boot_startup;
-    AVS_EA3_SHUTDOWN_T avs_ea3_shutdown;
+    AVS_EA3_BOOT_STARTUP_T avs_ea3_boot_startup = nullptr;
+    AVS_EA3_SHUTDOWN_T avs_ea3_shutdown = nullptr;
 
     namespace ea3 {
 
@@ -212,8 +212,20 @@ namespace avs {
             // load functions
             avs_ea3_boot_startup = libutils::get_proc<AVS_EA3_BOOT_STARTUP_T>(
                     DLL_INSTANCE, IMPORTS[i].boot);
-            avs_ea3_shutdown = libutils::get_proc<AVS_EA3_SHUTDOWN_T>(
-                    DLL_INSTANCE, IMPORTS[i].shutdown);
+            // FDD libavs exports ea3_boot but not ea3_shutdown; injected boot
+            // only needs ea3_boot for the network URL rewrite.
+            if (strcmp(IMPORTS[i].version, "legacy") == 0) {
+                avs_ea3_shutdown = libutils::try_proc<AVS_EA3_SHUTDOWN_T>(
+                        DLL_INSTANCE, IMPORTS[i].shutdown);
+                if (!avs_ea3_shutdown) {
+                    log_info("avs-ea3",
+                            "{} is not exported; skipping ea3 shutdown",
+                            IMPORTS[i].shutdown);
+                }
+            } else {
+                avs_ea3_shutdown = libutils::get_proc<AVS_EA3_SHUTDOWN_T>(
+                        DLL_INSTANCE, IMPORTS[i].shutdown);
+            }
         }
 
         void boot(unsigned short easrv_port, bool easrv_maint, bool easrv_smart) {
@@ -921,7 +933,9 @@ namespace avs {
 
             // EA3 shutdown
             log_info("avs-ea3", "shutdown");
-            avs_ea3_shutdown();
+            if (avs_ea3_shutdown != nullptr) {
+                avs_ea3_shutdown();
+            }
         }
     }
 }
