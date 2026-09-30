@@ -7,7 +7,6 @@
 #include <windows.h>
 #undef WIN32_NO_STATUS
 
-#include <intrin.h>
 #include <winternl.h>
 #include <ntstatus.h>
 
@@ -23,6 +22,15 @@
 
 // ANSI/OEM Japanese; Japanese (Shift-JIS)
 constexpr UINT CODEPAGE_SHIFT_JIS = 932;
+
+#if defined(__GNUC__)
+#define LANG_RETURN_ADDRESS() __builtin_return_address(0)
+#elif defined(_MSC_VER)
+#include <intrin.h>
+#define LANG_RETURN_ADDRESS() _ReturnAddress()
+#else
+#define LANG_RETURN_ADDRESS() nullptr
+#endif
 
 static decltype(GetACP) *GetACP_orig = nullptr;
 static decltype(GetOEMCP) *GetOEMCP_orig = nullptr;
@@ -47,7 +55,7 @@ static decltype(GetThreadLocale) *GetThreadLocale_orig = nullptr;
 static void *RtlMultiByteToUnicodeN_orig = nullptr;
 
 // eam3lib XML (C02) must keep the host ACP; GDI/bm2dx need Shift-JIS.
-// ret_addr must be the hook's _ReturnAddress() (the external caller).
+// ret_addr must be the hook's return address (the external caller).
 static bool module_is_eam3(const void *ret_addr) {
     if (!ret_addr) {
         return false;
@@ -79,7 +87,7 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
         const CHAR *MultiByteString,
         ULONG BytesInMultiByteString)
 {
-    if (module_is_eam3(_ReturnAddress()) && RtlMultiByteToUnicodeN_orig) {
+    if (module_is_eam3(LANG_RETURN_ADDRESS()) && RtlMultiByteToUnicodeN_orig) {
         using fn_t = NTSTATUS (NTAPI *)(PWCH, ULONG, PULONG, const CHAR *, ULONG);
         return reinterpret_cast<fn_t>(RtlMultiByteToUnicodeN_orig)(
                 UnicodeString,
@@ -132,14 +140,14 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
 }
 
 static UINT WINAPI GetACP_hook() {
-    if (module_is_eam3(_ReturnAddress()) && GetACP_orig) {
+    if (module_is_eam3(LANG_RETURN_ADDRESS()) && GetACP_orig) {
         return GetACP_orig();
     }
     return CODEPAGE_SHIFT_JIS;
 }
 
 static UINT WINAPI GetOEMCP_hook() {
-    if (module_is_eam3(_ReturnAddress()) && GetOEMCP_orig) {
+    if (module_is_eam3(LANG_RETURN_ADDRESS()) && GetOEMCP_orig) {
         return GetOEMCP_orig();
     }
     return CODEPAGE_SHIFT_JIS;
@@ -149,7 +157,7 @@ static UINT WINAPI GetOEMCP_hook() {
 // and LeadByte ranges. On a Western host that still returns SBCS info while GetACP
 // says 932 → fullwidth colon (SJIS 8146) drawn as two overlapping glyphs.
 static BOOL WINAPI GetCPInfo_hook(UINT CodePage, LPCPINFO lpCPInfo) {
-    if (module_is_eam3(_ReturnAddress()) && GetCPInfo_orig) {
+    if (module_is_eam3(LANG_RETURN_ADDRESS()) && GetCPInfo_orig) {
         return GetCPInfo_orig(CodePage, lpCPInfo);
     }
     switch (CodePage) {
@@ -279,7 +287,7 @@ static BOOL WINAPI IsDBCSLeadByte_hook (
     BYTE TestChar
     )
 {
-    if (module_is_eam3(_ReturnAddress())) {
+    if (module_is_eam3(LANG_RETURN_ADDRESS())) {
         if (IsDBCSLeadByte_orig) {
             return IsDBCSLeadByte_orig(TestChar);
         }
@@ -298,7 +306,7 @@ static BOOL WINAPI IsDBCSLeadByteEx_hook(
     UINT CodePage,
     BYTE TestChar)
 {
-    if (module_is_eam3(_ReturnAddress())) {
+    if (module_is_eam3(LANG_RETURN_ADDRESS())) {
         return IsDBCSLeadByteEx_orig(CodePage, TestChar);
     }
     switch (CodePage) {
