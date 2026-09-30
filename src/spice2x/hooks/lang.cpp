@@ -39,6 +39,9 @@ static decltype(GetSystemDefaultLCID) *GetSystemDefaultLCID_orig = nullptr;
 static decltype(GetThreadLocale) *GetThreadLocale_orig = nullptr;
 #endif
 
+// MinHook needs an orig slot even when the hook does not call through.
+static void *RtlMultiByteToUnicodeN_orig = nullptr;
+
 static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
         PWCH UnicodeString,
         ULONG MaxBytesInUnicodeString,
@@ -46,6 +49,9 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
         const CHAR *MultiByteString,
         ULONG BytesInMultiByteString)
 {
+    // MaxBytesInUnicodeString is bytes; MultiByteToWideChar wants wchar count.
+    const int cch_wide = static_cast<int>(MaxBytesInUnicodeString / sizeof(WCHAR));
+
     // try to convert
     auto wc_num = MultiByteToWideChar(
             CODEPAGE_SHIFT_JIS,
@@ -53,7 +59,7 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
             MultiByteString,
             static_cast<int>(BytesInMultiByteString),
             UnicodeString,
-            static_cast<int>(MaxBytesInUnicodeString)
+            cch_wide
     );
 
     // error handling
@@ -283,9 +289,25 @@ void hooks::lang::early_init() {
             "    some games may render text incorrectly or behave unexpectedly"});
     }
 
-    // hooking these two functions fixes the jubeat mojibake
-    detour::trampoline_try("kernel32.dll", "GetACP", GetACP_hook, &GetACP_orig);
-    detour::trampoline_try("kernel32.dll", "GetOEMCP", GetOEMCP_hook, &GetOEMCP_orig);
+    // Prefer kernelbase: gdi32full imports GetACP/GetOEMCP via api-ms-* which
+    // resolve to kernelbase, not the kernel32 jmp stubs. Hooking only kernel32
+    // leaves GDI on the host ACP (colon overlap on IIDX 9-13 status text).
+    {
+        decltype(GetACP) *orig = nullptr;
+        if (detour::trampoline_try("kernelbase.dll", "GetACP", GetACP_hook, &orig) && orig) {
+            GetACP_orig = orig;
+        } else {
+            orig = nullptr;
+            detour::trampoline_try("kernel32.dll", "GetACP", GetACP_hook, &GetACP_orig);
+        }
+        orig = nullptr;
+        if (detour::trampoline_try("kernelbase.dll", "GetOEMCP", GetOEMCP_hook, &orig) && orig) {
+            GetOEMCP_orig = orig;
+        } else {
+            orig = nullptr;
+            detour::trampoline_try("kernel32.dll", "GetOEMCP", GetOEMCP_hook, &GetOEMCP_orig);
+        }
+    }
 
 #ifdef SPICE64 // SDVX5+ specific code
     if (games::sdvx::is_valkyrie_model()) {
@@ -342,21 +364,48 @@ void hooks::lang::early_init() {
 #endif
             avs::game::is_model({ "C02", "D01", "E11", "ECO", "FDD" });
     if (hook_dbcs) {
+        // One export only (kernelbase preferred): kernel32 stubs jmp into
+        // kernelbase; dual hooks re-enter and AV. gdi32full calls these via
+        // api-ms → kernelbase, so kernel32-only hooks miss GDI text layout.
         log_info("hooks::lang", "hooking IsDBCSLeadByte");
-        detour::trampoline_try(
-            "kernel32.dll",
-            "IsDBCSLeadByte",
-            IsDBCSLeadByte_hook,
-            &IsDBCSLeadByte_orig);
-        detour::trampoline_try(
-            "kernel32.dll",
-            "IsDBCSLeadByteEx",
-            IsDBCSLeadByteEx_hook,
-            &IsDBCSLeadByteEx_orig);
+        {
+            decltype(IsDBCSLeadByteEx) *orig_ex = nullptr;
+            if (detour::trampoline_try(
+                        "kernelbase.dll",
+                        "IsDBCSLeadByteEx",
+                        IsDBCSLeadByteEx_hook,
+                        &orig_ex)
+                    && orig_ex) {
+                IsDBCSLeadByteEx_orig = orig_ex;
+            } else {
+                orig_ex = nullptr;
+                detour::trampoline_try(
+                        "kernel32.dll",
+                        "IsDBCSLeadByteEx",
+                        IsDBCSLeadByteEx_hook,
+                        &IsDBCSLeadByteEx_orig);
+            }
 
-        // GDI text extent converts via kernel32/kernelbase ACP paths. IAT-only
-        // MB2WC is not enough for IIDX 9-13 (often GetProcAddress / delay-load /
-        // gdi32 → kernelbase), which causes colon overlap on status lines.
+            decltype(IsDBCSLeadByte) *orig = nullptr;
+            if (detour::trampoline_try(
+                        "kernelbase.dll",
+                        "IsDBCSLeadByte",
+                        IsDBCSLeadByte_hook,
+                        &orig)
+                    && orig) {
+                IsDBCSLeadByte_orig = orig;
+            } else {
+                orig = nullptr;
+                detour::trampoline_try(
+                        "kernel32.dll",
+                        "IsDBCSLeadByte",
+                        IsDBCSLeadByte_hook,
+                        &IsDBCSLeadByte_orig);
+            }
+        }
+
+        // GDI text extent converts via kernelbase ACP paths. IAT-only MB2WC is
+        // not enough for IIDX 9-13 (GetProcAddress / delay-load / gdi32).
         //
         // Hook exactly ONE export: on Win10+ kernel32's MB2WC is a jmp into
         // kernelbase. Hooking both with the same detour re-enters the hook and
@@ -381,6 +430,17 @@ void hooks::lang::early_init() {
                 log_warning("hooks::lang",
                         "MultiByteToWideChar trampoline failed for legacy IIDX "
                         "(colon overlap likely on non-Japanese hosts)");
+            }
+
+            // bemanitools ACP hook: gdi32full imports RtlMultiByteToUnicodeN from
+            // ntdll for ANSI text. IAT walk can miss late loads; trampoline catches all.
+            if (detour::trampoline_try(
+                        "ntdll.dll",
+                        "RtlMultiByteToUnicodeN",
+                        reinterpret_cast<void *>(RtlMultiByteToUnicodeN_hook),
+                        &RtlMultiByteToUnicodeN_orig)) {
+                log_info("hooks::lang",
+                        "RtlMultiByteToUnicodeN trampoline installed for legacy IIDX");
             }
         }
     }
@@ -421,7 +481,15 @@ void hooks::lang::early_init() {
 void hooks::lang::init() {
     log_info("hooks::lang", "initializing");
 
+    // Keep IAT coverage for modules that imported before the ntdll trampoline.
     detour::iat_try("RtlMultiByteToUnicodeN", RtlMultiByteToUnicodeN_hook, nullptr, "ntdll.dll");
+    if (!RtlMultiByteToUnicodeN_orig) {
+        detour::trampoline_try(
+                "ntdll.dll",
+                "RtlMultiByteToUnicodeN",
+                reinterpret_cast<void *>(RtlMultiByteToUnicodeN_hook),
+                &RtlMultiByteToUnicodeN_orig);
+    }
 
     // Preserve MinHook trampoline orig if early_init already installed it.
     auto *prev = detour::iat_try(
