@@ -1074,15 +1074,13 @@ bool EZUSB2Handle::open(LPCWSTR lpFileName) {
         return false;
     }
     if (is_serial_board()) {
-        // INIT ERROR retries reopen Ezusb-0. One-shot init keeps H8 slot
-        // state; only clear the serial paging buffers on subsequent opens.
+        // C02 ezusb.dll CreateFile's Ezusb-0 for nearly every pipe transfer.
+        // Only init once — reset_buffers on reopen wiped uart echo before
+        // READ_BUFFER (log: echo len=4, then process_cmd 02 read_len=0).
         static bool serial_once = false;
         if (!serial_once) {
             ezusb_serial::init();
             serial_once = true;
-        } else {
-            log_info("iidx::ezusb2", "Ezusb-0 reopen; serial reset_buffers");
-            ezusb_serial::reset_buffers();
         }
     }
     return true;

@@ -118,12 +118,11 @@ static int WINAPI MultiByteToWideChar_hook(
     switch (CodePage) {
         case CP_ACP:
         case CP_THREAD_ACP:
-
-            // this fixes pop'n music's mojibake issue with the system locale not set to Japanese
-            SetThreadLocale(MAKELANGID(LANG_JAPANESE, SUBLANG_JAPANESE_JAPAN));
-
+            // Force Shift-JIS for legacy Japanese titles on non-JP hosts.
+            // Do not SetThreadLocale here: a process-wide trampoline would
+            // also hit eam3lib XML parsing and crash in wtof_l (seen on C02
+            // after NETWORK OK with read at 0x1).
             CodePage = CODEPAGE_SHIFT_JIS;
-
             break;
 
         default:
