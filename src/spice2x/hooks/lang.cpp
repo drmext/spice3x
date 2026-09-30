@@ -54,9 +54,11 @@ static decltype(GetThreadLocale) *GetThreadLocale_orig = nullptr;
 // MinHook needs an orig slot even when the hook does not call through.
 static void *RtlMultiByteToUnicodeN_orig = nullptr;
 
-// eam3lib XML (C02) must keep the host ACP; GDI/bm2dx need Shift-JIS.
-// ret_addr must be the hook's return address (the external caller).
-static bool module_is_eam3(const void *ret_addr) {
+// Force Shift-JIS only for GDI / the game image. eam3lib (and its CRT) must keep
+// the host ACP — blacklisting eam3 by return address fails because mbstowcs goes
+// RtlMultiByteToUnicodeN with a return address inside ntdll/ucrt, not eam3lib
+// (C02 xml_parse AV after services).
+static bool module_needs_sjis(const void *ret_addr) {
     if (!ret_addr) {
         return false;
     }
@@ -69,15 +71,25 @@ static bool module_is_eam3(const void *ret_addr) {
             || !caller) {
         return false;
     }
-    static HMODULE eam3 = nullptr;
-    static HMODULE eam3mod = nullptr;
-    if (!eam3) {
-        eam3 = GetModuleHandleA("eam3lib.dll");
+    static HMODULE gdi32 = nullptr;
+    static HMODULE gdi32full = nullptr;
+    static HMODULE user32 = nullptr;
+    if (!gdi32) {
+        gdi32 = GetModuleHandleA("gdi32.dll");
     }
-    if (!eam3mod) {
-        eam3mod = GetModuleHandleA("eam3mod.dll");
+    if (!gdi32full) {
+        gdi32full = GetModuleHandleA("gdi32full.dll");
     }
-    return caller == eam3 || caller == eam3mod;
+    if (!user32) {
+        user32 = GetModuleHandleA("user32.dll");
+    }
+    if (caller == gdi32 || caller == gdi32full || caller == user32) {
+        return true;
+    }
+    if (avs::game::DLL_INSTANCE && caller == avs::game::DLL_INSTANCE) {
+        return true;
+    }
+    return false;
 }
 
 static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
@@ -87,7 +99,7 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
         const CHAR *MultiByteString,
         ULONG BytesInMultiByteString)
 {
-    if (module_is_eam3(LANG_RETURN_ADDRESS()) && RtlMultiByteToUnicodeN_orig) {
+    if (!module_needs_sjis(LANG_RETURN_ADDRESS()) && RtlMultiByteToUnicodeN_orig) {
         using fn_t = NTSTATUS (NTAPI *)(PWCH, ULONG, PULONG, const CHAR *, ULONG);
         return reinterpret_cast<fn_t>(RtlMultiByteToUnicodeN_orig)(
                 UnicodeString,
@@ -140,16 +152,10 @@ static NTSTATUS NTAPI RtlMultiByteToUnicodeN_hook(
 }
 
 static UINT WINAPI GetACP_hook() {
-    if (module_is_eam3(LANG_RETURN_ADDRESS()) && GetACP_orig) {
-        return GetACP_orig();
-    }
     return CODEPAGE_SHIFT_JIS;
 }
 
 static UINT WINAPI GetOEMCP_hook() {
-    if (module_is_eam3(LANG_RETURN_ADDRESS()) && GetOEMCP_orig) {
-        return GetOEMCP_orig();
-    }
     return CODEPAGE_SHIFT_JIS;
 }
 
@@ -157,9 +163,6 @@ static UINT WINAPI GetOEMCP_hook() {
 // and LeadByte ranges. On a Western host that still returns SBCS info while GetACP
 // says 932 → fullwidth colon (SJIS 8146) drawn as two overlapping glyphs.
 static BOOL WINAPI GetCPInfo_hook(UINT CodePage, LPCPINFO lpCPInfo) {
-    if (module_is_eam3(LANG_RETURN_ADDRESS()) && GetCPInfo_orig) {
-        return GetCPInfo_orig(CodePage, lpCPInfo);
-    }
     switch (CodePage) {
         case CP_ACP:
         case CP_OEMCP:
@@ -287,14 +290,6 @@ static BOOL WINAPI IsDBCSLeadByte_hook (
     BYTE TestChar
     )
 {
-    if (module_is_eam3(LANG_RETURN_ADDRESS())) {
-        if (IsDBCSLeadByte_orig) {
-            return IsDBCSLeadByte_orig(TestChar);
-        }
-        if (IsDBCSLeadByteEx_orig) {
-            return IsDBCSLeadByteEx_orig(CP_ACP, TestChar);
-        }
-    }
     if (IsDBCSLeadByteEx_orig) {
         return IsDBCSLeadByteEx_orig(CODEPAGE_SHIFT_JIS, TestChar);
     }
@@ -306,9 +301,6 @@ static BOOL WINAPI IsDBCSLeadByteEx_hook(
     UINT CodePage,
     BYTE TestChar)
 {
-    if (module_is_eam3(LANG_RETURN_ADDRESS())) {
-        return IsDBCSLeadByteEx_orig(CodePage, TestChar);
-    }
     switch (CodePage) {
         case CP_ACP:
         case CP_THREAD_ACP:

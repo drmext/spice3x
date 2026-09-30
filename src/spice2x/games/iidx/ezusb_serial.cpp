@@ -1,11 +1,9 @@
 #include "ezusb_serial.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <mutex>
-#include <thread>
 #include <vector>
 
 #include "avs/game.h"
@@ -96,54 +94,41 @@ struct Slot {
     bool sensor_front = false;
     bool sensor_back = false;
     uint8_t card_id[8] {};
-    uint8_t keypad_code = 0;
+    std::atomic<uint8_t> keypad_code{0};
     uint16_t last_keypad = 0;
     uint8_t card_slot_state = SLOT_CLOSE;
     bool write_loopback_valid = false;
     uint8_t write_loopback[128] {};
 };
 Slot g_slot[2] {};
-std::atomic<bool> g_poll_run{false};
-std::thread g_poll_thread;
 
 uint8_t keypad_scan_code(uint8_t bit);
 
-void poll_keypad_locked(uint8_t node) {
+// Sample keypad on the serial/ioctl thread only. A dedicated poll thread racing
+// GameAPI/RI_MGR made 10key extremely laggy; bemanitools polls from its emu
+// thread because eamio is designed for that — spice's RI_MGR is not.
+void poll_keypad(uint8_t node) {
     if (node < 1 || node > 2) {
         return;
     }
     Slot &s = g_slot[node - 1];
     const size_t unit = node - 1;
-    // Sample eamio without holding g_mu — GameAPI/rawinput can block and the
-    // serial ioctl path also takes g_mu (keypad "lockups" in test menu).
     const uint16_t kp = eamuse_get_keypad_state(unit);
     const uint16_t rise = kp & static_cast<uint16_t>(~s.last_keypad);
     s.last_keypad = kp;
-    // Only latch a new code when the buffer is empty; keep last_keypad updated
-    // so a held key does not re-fire, matching bemanitools' single-byte buffer.
-    if (rise && s.keypad_code == 0) {
-        for (uint8_t i = 0; i < 12; i++) {
-            if (rise & (1u << i)) {
-                const uint8_t code = keypad_scan_code(i);
-                if (code != 0) {
-                    s.keypad_code = code;
-                }
-                break;
-            }
-        }
+    if (!rise) {
+        return;
     }
-}
-
-void poll_thread_main() {
-    // bemanitools node-serial emu thread: sample eamio ~100Hz so brief keypad
-    // presses are not missed between rare KEYBOARD_* serial commands.
-    while (g_poll_run.load(std::memory_order_relaxed)) {
-        // Intentionally no g_mu here; poll_keypad_locked only touches per-slot
-        // keypad fields that serial KEYBOARD_READ also uses. A torn read of
-        // keypad_code is acceptable (0 or a scan code).
-        poll_keypad_locked(1);
-        poll_keypad_locked(2);
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // bemanitools: InterlockedCompareExchange only if buffer empty
+    for (uint8_t i = 0; i < 12; i++) {
+        if (rise & (1u << i)) {
+            const uint8_t code = keypad_scan_code(i);
+            if (code != 0) {
+                uint8_t expected = 0;
+                s.keypad_code.compare_exchange_strong(expected, code);
+            }
+            break;
+        }
     }
 }
 
@@ -301,8 +286,8 @@ void poll_slot(uint8_t node) {
         try_read_card(s, unit);
     }
 
-    // Keypad is sampled on the poll thread (no g_mu) so serial KEYBOARD_*
-    // commands under g_mu never block on GameAPI/rawinput.
+    // Sample keypad on every node message (RW status / keyboard polls are frequent).
+    poll_keypad(node);
 }
 
 void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
@@ -494,7 +479,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         }
         case NODE_KEYBOARD_BUF_SIZE: {
             uint8_t payload[2] = {0, 0};
-            if (slot && slot->keypad_code != 0) {
+            if (slot && slot->keypad_code.load(std::memory_order_relaxed) != 0) {
                 payload[0] = 1; // little-endian uint16 size type
             }
             build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 2, payload, 2);
@@ -503,9 +488,9 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         case NODE_KEYBOARD_READ: {
             uint8_t size_type = in->payload_len >= 1 ? in->payload[0] : 0;
             uint8_t payload[64] {};
-            if (size_type >= 1 && slot && slot->keypad_code != 0) {
-                payload[0] = slot->keypad_code;
-                slot->keypad_code = 0;
+            if (size_type >= 1 && slot) {
+                // bemanitools InterlockedExchange — take and clear
+                payload[0] = slot->keypad_code.exchange(0);
             }
             static constexpr uint8_t sizes[] = {0, 1, 2, 4, 8, 16, 32, 64};
             const uint8_t payload_bytes =
@@ -618,14 +603,19 @@ void reset_buffers() {
     memset(g_write_buf, 0, sizeof(g_write_buf));
 }
 
-void init() {
-    // Stop a previous poll thread if init() is called again (ezusb reopen).
-    if (g_poll_run.exchange(false)) {
-        if (g_poll_thread.joinable()) {
-            g_poll_thread.join();
-        }
-    }
+void reset_slot(Slot &s) {
+    s.emu = EmuState::Uninit;
+    s.sensor_front = false;
+    s.sensor_back = false;
+    memset(s.card_id, 0, sizeof(s.card_id));
+    s.keypad_code.store(0);
+    s.last_keypad = 0;
+    s.card_slot_state = SLOT_CLOSE;
+    s.write_loopback_valid = false;
+    memset(s.write_loopback, 0, sizeof(s.write_loopback));
+}
 
+void init() {
     std::lock_guard lock(g_mu);
     g_read_busy = false;
     g_write_busy = false;
@@ -635,12 +625,9 @@ void init() {
     g_write_page = 0;
     memset(g_read_buf, 0, sizeof(g_read_buf));
     memset(g_write_buf, 0, sizeof(g_write_buf));
-    g_slot[0] = {};
-    g_slot[1] = {};
+    reset_slot(g_slot[0]);
+    reset_slot(g_slot[1]);
     log_info("iidx::serial", "magnetic reader emulation initialized");
-
-    g_poll_run = true;
-    g_poll_thread = std::thread(poll_thread_main);
 }
 
 uint8_t process_cmd(uint8_t cmd) {
