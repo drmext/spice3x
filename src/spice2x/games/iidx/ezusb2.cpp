@@ -1,7 +1,6 @@
 #include "ezusb2.h"
 
 #include <algorithm>
-#include <cstddef>
 #include <cstring>
 #include <string>
 
@@ -25,11 +24,11 @@ constexpr DWORD IOCTL_EZUSB_BULK_READ = 0x22204E;
 constexpr DWORD IOCTL_EZUSB_BULK_WRITE = 0x222051;
 constexpr DWORD IOCTL_EZUSB_ANCHOR_DOWNLOAD = 0x22206D;
 
-// Sirius (JDJ) uses the 2235 identity; Gold–EMPRESS use FX2LP.
-constexpr uint16_t EZUSB_VID_2235 = 0x0547;
-constexpr uint16_t EZUSB_PID_2235 = 0x2235;
-constexpr uint16_t EZUSB_VID_FX2 = 0x04B4;
-constexpr uint16_t EZUSB_PID_FX2 = 0x8613;
+// EMPRESS accepts VID 0547, and the boot path that finishes firmware download
+// checks the product id for 2235. 8613 takes a different branch that never
+// completes (FM DL-ERR).
+constexpr uint16_t EZUSB_VID = 0x0547;
+constexpr uint16_t EZUSB_PID = 0x2235;
 
 constexpr size_t EZUSB_PAGESIZE = 62;
 constexpr size_t SECURITY2_NPAGES = 5;
@@ -218,50 +217,7 @@ struct InterruptReadPacket {
     uint8_t serial_io_busy_flag;
     uint8_t sliders[3];
 };
-static_assert(sizeof(InterruptReadPacket) == 16, "Sirius interrupt read is 16 bytes");
-
-// Gold–EMPRESS FX2 endpoint expects 64-byte interrupt transfers (bemanitools
-// ezusb2-iidx/msg.h). A short read makes SQ-INIT fail.
-struct Fx2InterruptWritePacket {
-    uint8_t unk0;
-    uint8_t unk1;
-    uint8_t node;
-    uint8_t cmd;
-    uint8_t cmd_detail[2];
-    uint8_t unk2;
-    uint8_t unk3;
-    uint8_t panel_lights;
-    uint8_t unk4;
-    uint8_t unk5;
-    uint16_t deck_lights;
-    uint8_t unk6;
-    uint8_t top_lamps;
-    uint8_t top_neons;
-    uint8_t seg16[9];
-    uint8_t padding[39];
-};
-static_assert(sizeof(Fx2InterruptWritePacket) == 64, "FX2 interrupt write is 64 bytes");
-static_assert(offsetof(Fx2InterruptWritePacket, panel_lights) == 8, "FX2 panel_lights offset");
-static_assert(offsetof(Fx2InterruptWritePacket, deck_lights) == 11, "FX2 deck_lights offset");
-static_assert(offsetof(Fx2InterruptWritePacket, top_lamps) == 14, "FX2 top_lamps offset");
-
-struct Fx2InterruptReadPacket {
-    uint8_t unk0;
-    uint8_t unk1;
-    uint8_t unk2;
-    uint8_t seq_no;
-    uint8_t status;
-    uint8_t unk3;
-    uint8_t unk4;
-    uint8_t unk5;
-    uint32_t inverted_pad;
-    uint8_t unk6;
-    uint8_t p2_turntable;
-    uint8_t p1_turntable;
-    uint8_t sliders[3];
-    uint8_t padding[46];
-};
-static_assert(sizeof(Fx2InterruptReadPacket) == 64, "FX2 interrupt read is 64 bytes");
+static_assert(sizeof(InterruptReadPacket) == 16, "interrupt read is 16 bytes");
 
 struct BulkPacket {
     uint8_t node;
@@ -336,8 +292,16 @@ void ensure_eeprom() {
 
 constexpr char kBlackSignKey[8] = {'2', 'D', 'X', 'G', 'L', 'D', 'A', 'C'};
 constexpr char kWhiteSignKey[8] = {'E', '-', 'A', 'M', 'U', 'S', 'E', '3'};
-constexpr char kBlackMcode[8] = {'G', 'C', 'J', 'D', 'J', 'J', 'A', 'A'};
 constexpr char kWhiteMcode[8] = {'@', '@', '@', '@', '@', '@', '@', '@'};
+
+// sec.black_plug_mcode. Same 8 bytes bemanitools ships per title.
+// 14 GQGLDJAA, 15 GQHDDJAA, 16 GQI00JAA, 17 GCJDJJAA.
+const char *black_mcode() {
+    if (avs::game::is_model("GLD")) return "GQGLDJAA";
+    if (avs::game::is_model("HDD")) return "GQHDDJAA";
+    if (avs::game::is_model("I00")) return "GQI00JAA";
+    return "GCJDJJAA";
+}
 
 SecurityId g_pcbid {};
 SecurityId g_eamid {};
@@ -403,7 +367,8 @@ void ensure_security_ids() {
     }
     g_eamid = g_pcbid;
     g_ids_ready = true;
-    log_info("iidx::ezusb2", "security ids ready (PCBID checksum {:02X})", g_pcbid.checksum);
+    log_info("iidx::ezusb2", "security ids ready (PCBID checksum {:02X}, black mcode {})",
+            g_pcbid.checksum, black_mcode());
 }
 
 void encode_8_to_6(const uint8_t *in, uint8_t *out) {
@@ -528,7 +493,7 @@ bool read_secplug_packet(BulkPacket *pkg) {
     pkg->page = 0x00;
     Rp2Eeprom eeprom {};
     if (black) {
-        rp2_signed_eeprom(true, kBlackSignKey, kBlackMcode, id, &eeprom);
+        rp2_signed_eeprom(true, kBlackSignKey, black_mcode(), id, &eeprom);
     } else {
         rp2_signed_eeprom(false, kWhiteSignKey, kWhiteMcode, id, &eeprom);
     }
@@ -703,25 +668,14 @@ uint32_t build_iidx_pad() {
     return ~pad;
 }
 
-// Gold–EMPRESS FX2 pad map (bemanitools ezusb2-iidx-emu/msg.c).
-uint32_t build_fx2_pad() {
-    const PadBits bits = read_pad_bits();
-    uint32_t pad = ((bits.keys & 0x3FFFu) << 16)
-            | (bits.panel & 0x0Fu)
-            | ((bits.sys & 0x07u) << 4)
-            | (((bits.sys >> 2) & 0x01u) << 30);
-    return ~pad;
-}
-
-bool is_fx2_packet() {
-    return avs::game::is_model({"GLD", "HDD", "I00"});
-}
-
-bool interrupt_read_sirius(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
+bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
     if (nOutBufferSize < sizeof(InterruptReadPacket) || !lpOutBuffer) {
         return false;
     }
 
+    // EMPRESS firmware download polls this 16-byte layout (fpga_write_ready at
+    // offset 11). A 64-byte FX2 reorder never looks complete, so the game
+    // times out with FM DL-ERR.
     InterruptReadPacket msg {};
     msg.inverted_pad = build_iidx_pad();
     msg.status = g_status;
@@ -740,34 +694,7 @@ bool interrupt_read_sirius(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
     return true;
 }
 
-bool interrupt_read_fx2(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
-    if (nOutBufferSize < sizeof(Fx2InterruptReadPacket) || !lpOutBuffer) {
-        return false;
-    }
-
-    Fx2InterruptReadPacket msg {};
-    msg.seq_no = g_seq_no++;
-    msg.status = g_status;
-    g_status = 0;
-    msg.inverted_pad = build_fx2_pad();
-    msg.p2_turntable = get_tt(1, false);
-    msg.p1_turntable = get_tt(0, false);
-    msg.sliders[0] = static_cast<uint8_t>((get_slider(1) << 4) | get_slider(0));
-    msg.sliders[1] = static_cast<uint8_t>((get_slider(3) << 4) | get_slider(2));
-    msg.sliders[2] = get_slider(4);
-
-    memcpy(lpOutBuffer, &msg, sizeof(msg));
-    return true;
-}
-
-bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
-    if (is_fx2_packet()) {
-        return interrupt_read_fx2(lpOutBuffer, nOutBufferSize);
-    }
-    return interrupt_read_sirius(lpOutBuffer, nOutBufferSize);
-}
-
-bool interrupt_write_sirius(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
+bool interrupt_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
     if (nOutBufferSize < sizeof(InterruptWritePacket) || !lpOutBuffer) {
         return false;
     }
@@ -789,45 +716,6 @@ bool interrupt_write_sirius(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
         return false;
     }
     return true;
-}
-
-bool interrupt_write_fx2(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
-    if (nOutBufferSize < sizeof(Fx2InterruptWritePacket) || !lpOutBuffer) {
-        return false;
-    }
-
-    Fx2InterruptWritePacket msg {};
-    memcpy(&msg, lpOutBuffer, sizeof(msg));
-
-    write_lamp(msg.deck_lights);
-    write_led(msg.panel_lights);
-    write_top_lamp(msg.top_lamps);
-    write_top_neon(msg.top_neons);
-
-    IIDX_LED_TICKER_LOCK.lock();
-    if (!IIDXIO_LED_TICKER_READONLY) {
-        memcpy(IIDXIO_LED_TICKER, msg.seg16, 9);
-        IIDXIO_LED_TICKER[9] = '\0';
-    }
-    IIDX_LED_TICKER_LOCK.unlock();
-
-    if (RI_MGR) {
-        RI_MGR->devices_flush_output();
-    }
-
-    g_cur_node = msg.node;
-    if (!process_node_cmd(msg.node, msg.cmd, msg.cmd_detail[0], msg.cmd_detail[1])) {
-        g_cur_node = 0;
-        return false;
-    }
-    return true;
-}
-
-bool interrupt_write(LPCVOID lpOutBuffer, DWORD nOutBufferSize) {
-    if (is_fx2_packet()) {
-        return interrupt_write_fx2(lpOutBuffer, nOutBufferSize);
-    }
-    return interrupt_write_sirius(lpOutBuffer, nOutBufferSize);
 }
 
 bool bulk_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
@@ -937,13 +825,8 @@ int ioctl_get_device_descriptor(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
     UsbDeviceDescriptor desc {};
     desc.bLength = sizeof(desc);
     desc.bDescriptorType = 0x01;
-    if (is_fx2_packet()) {
-        desc.idVendor = EZUSB_VID_FX2;
-        desc.idProduct = EZUSB_PID_FX2;
-    } else {
-        desc.idVendor = EZUSB_VID_2235;
-        desc.idProduct = EZUSB_PID_2235;
-    }
+    desc.idVendor = EZUSB_VID;
+    desc.idProduct = EZUSB_PID;
     memcpy(lpOutBuffer, &desc, sizeof(desc));
     return static_cast<int>(sizeof(desc));
 }
@@ -990,10 +873,7 @@ int ioctl_pipe_read(LPVOID lpInBuffer, DWORD nInBufferSize,
                 return -1;
             }
             // Report the packet size, not the caller's buffer (bemani read.pos).
-            // FX2 needs the full 64 bytes or SQ-INIT fails on a short transfer.
-            return is_fx2_packet()
-                    ? static_cast<int>(sizeof(Fx2InterruptReadPacket))
-                    : static_cast<int>(sizeof(InterruptReadPacket));
+            return static_cast<int>(sizeof(InterruptReadPacket));
         case PIPE_BULK_IN:
             if (!bulk_read(lpOutBuffer, nOutBufferSize)) {
                 return -1;
