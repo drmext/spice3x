@@ -495,7 +495,9 @@ void set_read_buf(const uint8_t *data, size_t len) {
     memcpy(g_read_buf, data, len);
     g_read_len = static_cast<uint16_t>(len);
     g_read_page = 0;
-    g_read_busy = true;
+    // bemanitools never asserts read_buf_busy (msg.c: "always cleared to pass
+    // on boot"). Asserting it here made UART echo replies stall INIT.
+    g_read_busy = false;
     g_write_len = 0;
 }
 
@@ -513,17 +515,18 @@ void exec_write_buf() {
     }
 
     if (g_write_buf[0] != HEADER_BYTE) {
-        log_warning("iidx::serial", "frame missing 0xAA header");
+        log_warning("iidx::serial", "frame missing 0xAA header (len {})", g_write_len);
         g_write_len = 0;
         return;
     }
     if (g_write_len < 3) {
+        log_warning("iidx::serial", "frame too short ({})", g_write_len);
         g_write_len = 0;
         return;
     }
     if (g_write_buf[g_write_len - 1]
             != checksum(g_write_buf + 1, static_cast<uint16_t>(g_write_len - 2))) {
-        log_warning("iidx::serial", "invalid serial checksum");
+        log_warning("iidx::serial", "invalid serial checksum (len {})", g_write_len);
         g_write_len = 0;
         return;
     }
@@ -542,6 +545,9 @@ void exec_write_buf() {
     auto *msg = reinterpret_cast<const SerialMsg *>(msg_buf);
     std::vector<uint8_t> inner;
     if (!handle_msg(msg, msg_len, inner) || inner.empty()) {
+        log_warning("iidx::serial",
+                "dropped serial frame msg={:02x} node={} cmd={:02x} len={}",
+                msg->msg_cmd, msg->node_id, msg->node_cmd, msg_len);
         g_write_len = 0;
         return;
     }
@@ -564,6 +570,18 @@ void exec_write_buf() {
 }
 
 } // namespace
+
+void reset_buffers() {
+    std::lock_guard lock(g_mu);
+    g_read_busy = false;
+    g_write_busy = false;
+    g_read_len = 0;
+    g_write_len = 0;
+    g_read_page = 0;
+    g_write_page = 0;
+    memset(g_read_buf, 0, sizeof(g_read_buf));
+    memset(g_write_buf, 0, sizeof(g_write_buf));
+}
 
 void init() {
     std::lock_guard lock(g_mu);
@@ -591,15 +609,13 @@ uint8_t process_cmd(uint8_t cmd) {
             g_write_busy = false;
             g_write_page = 0;
             return SERIAL_OK;
-        case 0x04: // CLEAR_READ
+        case 0x04: // CLEAR_READ — bemanitools clears busy/page only
             g_read_busy = false;
             g_read_page = 0;
-            g_read_len = 0;
             return SERIAL_OK;
-        case 0x05: // CLEAR_WRITE
+        case 0x05: // CLEAR_WRITE — bemanitools clears busy/page only
             g_write_busy = false;
             g_write_page = 0;
-            g_write_len = 0;
             return SERIAL_OK;
         default:
             log_warning("iidx::serial", "unknown serial cmd {:02x}", cmd);

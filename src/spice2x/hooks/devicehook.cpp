@@ -6,6 +6,7 @@
 #include "util/detour.h"
 #include "util/logging.h"
 #include "util/utils.h"
+#include "hooks/lang.h"
 
 #include <tlhelp32.h>
 
@@ -229,11 +230,22 @@ static const wchar_t *remap_settings_path_w(const wchar_t *path, bool *remapped 
 }
 
 static void log_settings_remap_fail_a(const char *op, const char *path, DWORD disposition, DWORD err) {
+    // OPEN_EXISTING + FILE_NOT_FOUND is normal probing (NVRAM slots, rddapi.dat).
+    if (disposition == OPEN_EXISTING && err == ERROR_FILE_NOT_FOUND) {
+        log_misc("devicehook", "{} remapped settings probe miss: path=\"{}\"",
+                op, path ? path : "(null)");
+        return;
+    }
     log_warning("devicehook", "{} remapped settings path failed: path=\"{}\" disposition={} GetLastError={}",
             op, path ? path : "(null)", disposition, err);
 }
 
 static void log_settings_remap_fail_w(const char *op, const wchar_t *path, DWORD disposition, DWORD err) {
+    if (disposition == OPEN_EXISTING && err == ERROR_FILE_NOT_FOUND) {
+        log_misc("devicehook", "{} remapped settings probe miss: path=\"{}\"",
+                op, path ? ws2s(path) : "(null)");
+        return;
+    }
     log_warning("devicehook", "{} remapped settings path failed: path=\"{}\" disposition={} GetLastError={}",
             op, path ? ws2s(path) : "(null)", disposition, err);
 }
@@ -711,6 +723,7 @@ static HMODULE WINAPI LoadLibraryA_hook(LPCSTR lpLibFileName) {
     if (module != nullptr) {
         // Hook newly loaded modules (e.g. libacio.dll) without thread suspend
         devicehook_init_module(module);
+        hooks::lang::init_module(module);
     }
     return module;
 }
@@ -719,6 +732,7 @@ static HMODULE WINAPI LoadLibraryW_hook(LPCWSTR lpLibFileName) {
     HMODULE module = LoadLibraryW_orig(lpLibFileName);
     if (module != nullptr) {
         devicehook_init_module(module);
+        hooks::lang::init_module(module);
     }
     return module;
 }

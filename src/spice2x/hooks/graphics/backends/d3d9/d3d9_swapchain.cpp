@@ -8,6 +8,7 @@
 #include "sdk/d3d9.h"
 
 #include "d3d9_backend.h"
+#include "d3d9_bb_scale.h"
 #include "d3d9_device.h"
 
 // std::min
@@ -154,6 +155,11 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DSwapChain9::GetBackBuffer(UINT iBackBu
 {
     if (scales_small_head(this) && iBackBuffer == 0 && Type == D3DBACKBUFFER_TYPE_MONO) {
         CHECK_RESULT(pDev->gfdm_small_head.backbuffer(pDev->pReal, ppBackBuffer));
+    }
+
+    // Match device GetBackBuffer: hand back the 640x480 game RT under bb_scale.
+    if (d3d9_bb_scale::try_get_back_buffer(0, iBackBuffer, Type, ppBackBuffer)) {
+        return D3D_OK;
     }
 
     CHECK_RESULT(pReal->GetBackBuffer(iBackBuffer, Type, ppBackBuffer));

@@ -34,4 +34,7 @@ bool try_get_back_buffer(
         D3DBACKBUFFER_TYPE Type,
         IDirect3DSurface9 **ppBackBuffer);
 
+// Native (pre-scale) backbuffer size used for IIDX 9-13 GetClientRect viewport.
+bool native_size(UINT *width, UINT *height);
+
 } // namespace d3d9_bb_scale

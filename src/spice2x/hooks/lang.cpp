@@ -28,14 +28,14 @@ static decltype(GetOEMCP) *GetOEMCP_orig = nullptr;
 static decltype(MultiByteToWideChar) *MultiByteToWideChar_orig = nullptr;
 static decltype(WideCharToMultiByte) *WideCharToMultiByte_orig = nullptr;
 static decltype(GetLocaleInfoEx) *GetLocaleInfoEx_orig = nullptr;
+static decltype(IsDBCSLeadByte) *IsDBCSLeadByte_orig = nullptr;
+static decltype(IsDBCSLeadByteEx) *IsDBCSLeadByteEx_orig = nullptr;
 #ifdef SPICE64
 static decltype(GetLocaleInfoA) *GetLocaleInfoA_orig = nullptr;
 #endif
 
 #ifdef SPICE64
 static decltype(GetSystemDefaultLCID) *GetSystemDefaultLCID_orig = nullptr;
-static decltype(IsDBCSLeadByte) *IsDBCSLeadByte_orig = nullptr;
-static decltype(IsDBCSLeadByteEx) *IsDBCSLeadByteEx_orig = nullptr;
 static decltype(GetThreadLocale) *GetThreadLocale_orig = nullptr;
 #endif
 
@@ -181,8 +181,6 @@ static int WINAPI GetLocaleInfoEx_hook (
     return GetLocaleInfoEx_orig(lpLocaleName, LCType, lpLCData, cchData);
 }
 
-#ifdef SPICE64
-
 static BOOL WINAPI IsDBCSLeadByte_hook (
     BYTE TestChar
     )
@@ -210,8 +208,6 @@ static BOOL WINAPI IsDBCSLeadByteEx_hook(
 
     return IsDBCSLeadByteEx_orig(CodePage, TestChar);
 }
-
-#endif
 
 static
 int
@@ -334,20 +330,25 @@ void hooks::lang::early_init() {
             &GetLocaleInfoA_orig);
     }
 
+#endif
+
     // for TDJ subscreen search keyboard
     // T44 narrow-string handling
     // NDD text measuring
-    if ((avs::game::is_model("LDJ") && games::iidx::TDJ_MODE) ||
-        avs::game::is_model({ "T44", "NDD" })) {
+    // IIDX 9-13 Shift-JIS layout (colon overlap on non-Japanese hosts)
+    const bool hook_dbcs =
+#ifdef SPICE64
+            (avs::game::is_model("LDJ") && games::iidx::TDJ_MODE) ||
+            avs::game::is_model({ "T44", "NDD" }) ||
+#endif
+            avs::game::is_model({ "C02", "D01", "E11", "ECO", "FDD" });
+    if (hook_dbcs) {
         log_info("hooks::lang", "hooking IsDBCSLeadByte");
         detour::trampoline_try(
             "kernel32.dll",
             "IsDBCSLeadByte",
             IsDBCSLeadByte_hook,
             &IsDBCSLeadByte_orig);
-    }
-
-    if (games::popn::is_pikapika_model() && native_code_page == CP_UTF8) {
         detour::trampoline_try(
             "kernel32.dll",
             "IsDBCSLeadByteEx",
@@ -355,6 +356,17 @@ void hooks::lang::early_init() {
             &IsDBCSLeadByteEx_orig);
     }
 
+#ifdef SPICE64
+    if (games::popn::is_pikapika_model() && native_code_page == CP_UTF8) {
+        // IsDBCSLeadByteEx already hooked above for some models; ensure it is set.
+        if (!IsDBCSLeadByteEx_orig) {
+            detour::trampoline_try(
+                "kernel32.dll",
+                "IsDBCSLeadByteEx",
+                IsDBCSLeadByteEx_hook,
+                &IsDBCSLeadByteEx_orig);
+        }
+    }
 #endif
 
 #ifdef SPICE64

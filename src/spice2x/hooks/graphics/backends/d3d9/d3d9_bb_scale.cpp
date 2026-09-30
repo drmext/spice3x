@@ -230,4 +230,14 @@ bool try_get_back_buffer(
     return true;
 }
 
+bool native_size(UINT *width, UINT *height) {
+    if (!active() || game_bb_width == 0 || game_bb_height == 0
+            || width == nullptr || height == nullptr) {
+        return false;
+    }
+    *width = game_bb_width;
+    *height = game_bb_height;
+    return true;
+}
+
 } // namespace d3d9_bb_scale

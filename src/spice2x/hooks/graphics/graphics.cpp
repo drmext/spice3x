@@ -24,6 +24,7 @@
 #include "games/popn/popn.h"
 #include "hooks/graphics/jpeg_encoder.h"
 #include "hooks/graphics/backends/d3d9/d3d9_backend.h"
+#include "hooks/graphics/backends/d3d9/d3d9_bb_scale.h"
 #include "hooks/graphics/backends/d3d11/d3d11_backend.h"
 #include "launcher/shutdown.h"
 #include "misc/hotkeys.h"
@@ -181,6 +182,7 @@ static decltype(SetWindowLongA) *SetWindowLongA_orig = nullptr;
 static decltype(SetWindowLongW) *SetWindowLongW_orig = nullptr;
 static decltype(SetWindowPos) *SetWindowPos_orig = nullptr;
 static decltype(ShowWindow) *ShowWindow_orig = nullptr;
+static decltype(GetClientRect) *GetClientRect_orig = nullptr;
 static decltype(SetDisplayConfig) *SetDisplayConfig_addr = nullptr;
 
 static void reset_window_hook(HWND hWnd) {
@@ -1404,6 +1406,27 @@ static int WINAPI MessageBoxExW_hook(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaptio
     return IDOK;
 }
 
+// IIDX 9-13 size the viewport from GetClientRect. When bb_scale presents an
+// 854x480 client while the game draws at 640x480, report the native size.
+static BOOL WINAPI GetClientRect_hook(HWND hWnd, LPRECT lpRect) {
+    const BOOL ok = GetClientRect_orig(hWnd, lpRect);
+    if (!ok || lpRect == nullptr) {
+        return ok;
+    }
+    if (!avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD"})) {
+        return ok;
+    }
+    UINT w = 0, h = 0;
+    if (!d3d9_bb_scale::native_size(&w, &h)) {
+        return ok;
+    }
+    lpRect->left = 0;
+    lpRect->top = 0;
+    lpRect->right = static_cast<LONG>(w);
+    lpRect->bottom = static_cast<LONG>(h);
+    return ok;
+}
+
 void graphics_init() {
     log_info("graphics", "initializing");
 
@@ -1437,6 +1460,7 @@ void graphics_init() {
     SetWindowLongW_orig = detour::iat_try("SetWindowLongW", SetWindowLongW_hook);
     SetWindowPos_orig = detour::iat_try("SetWindowPos", SetWindowPos_hook);
     ShowWindow_orig = detour::iat_try("ShowWindow", ShowWindow_hook);
+    GetClientRect_orig = detour::iat_try("GetClientRect", GetClientRect_hook);
 
     detour::iat_try("MessageBoxA", MessageBoxA_hook);
     detour::iat_try("MessageBoxExA", MessageBoxExA_hook);
@@ -1477,6 +1501,7 @@ void graphics_init() {
         KEEP_ORIG(SetWindowLongW_orig, "SetWindowLongW", SetWindowLongW_hook);
         KEEP_ORIG(SetWindowPos_orig, "SetWindowPos", SetWindowPos_hook);
         KEEP_ORIG(ShowWindow_orig, "ShowWindow", ShowWindow_hook);
+        KEEP_ORIG(GetClientRect_orig, "GetClientRect", GetClientRect_hook);
 
 #undef KEEP_ORIG
 

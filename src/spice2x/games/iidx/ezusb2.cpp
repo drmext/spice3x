@@ -1064,7 +1064,15 @@ bool EZUSB2Handle::open(LPCWSTR lpFileName) {
         return false;
     }
     if (is_serial_board()) {
-        ezusb_serial::init();
+        // INIT ERROR retries reopen Ezusb-0. One-shot init keeps H8 slot
+        // state; only clear the serial paging buffers on subsequent opens.
+        static bool serial_once = false;
+        if (!serial_once) {
+            ezusb_serial::init();
+            serial_once = true;
+        } else {
+            ezusb_serial::reset_buffers();
+        }
     }
     return true;
 }

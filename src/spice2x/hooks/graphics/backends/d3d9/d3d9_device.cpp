@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <climits>
+#include <cstring>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -25,6 +26,131 @@
 #ifndef SPICE64
 #include "shaders/vertex_shader.h"
 #endif
+
+namespace {
+
+// bemanitools iidxhook-util/d3d9.c background-video vertex layout (stride 28)
+struct IidxBgVertex {
+    float x, y, z;
+    uint32_t color;
+    uint32_t unknown;
+    float tu, tv;
+};
+
+bool float_near(float a, float b, float eps) {
+    const float d = a - b;
+    return d < eps && d > -eps;
+}
+
+// Port of iidxhook_util_d3d9_iidx09_to_17_fix_uvs_bg_videos — copy verts,
+// nudge UVs to hide diagonal seams on bg video quads.
+const void *fix_iidx_bg_video_uvs(
+        D3DPRIMITIVETYPE type,
+        UINT count,
+        const void *data,
+        UINT stride,
+        IidxBgVertex *out4)
+{
+    if (type != D3DPT_TRIANGLEFAN || count != 2 || stride != sizeof(IidxBgVertex)
+            || data == nullptr || out4 == nullptr) {
+        return data;
+    }
+    if (!avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD",
+            "GLD", "HDD", "I00", "JDJ"})) {
+        return data;
+    }
+
+    memcpy(out4, data, sizeof(IidxBgVertex) * 4);
+    auto *v = out4;
+
+    // Full-screen 640x480 background video
+    if (v[0].x >= 0.0f && v[0].x < 1.0f && v[0].y >= 0.0f && v[0].y < 1.0f
+            && v[1].x > 639.0f && v[1].x < 641.0f && v[1].y >= 0.0f && v[1].y < 1.0f
+            && v[2].x > 639.0f && v[2].x < 641.0f && v[2].y > 479.0f && v[2].y < 481.0f
+            && v[3].x >= 0.0f && v[3].x < 1.0f && v[3].y > 479.0f && v[3].y < 481.0f) {
+        v[0].tu = 0.0f + 1.0f / 640;
+        v[0].tv = 1.0f;
+        v[1].tu = 1.0f;
+        v[1].tv = 1.0f;
+        v[2].tu = 1.0f;
+        v[2].tv = 0.0f + 1.0f / 480;
+        v[3].tu = 0.0f + 1.0f / 640;
+        v[3].tv = 0.0f + 1.0f / 480;
+        return out4;
+    }
+
+    const bool single =
+            v[0].x >= 164.0f && v[0].x <= 168.0f && float_near(v[0].y, 0.0f, 0.1f)
+            && v[1].x >= 472.0f && v[1].x <= 476.1f && float_near(v[1].y, 0.0f, 0.1f)
+            && v[2].x >= 472.0f && v[2].x <= 476.1f
+            && (float_near(v[2].y, 415.0f, 0.1f) || float_near(v[2].y, 416.0f, 0.1f))
+            && v[3].x >= 164.0f && v[3].x <= 168.0f
+            && (float_near(v[3].y, 415.0f, 0.1f) || float_near(v[3].y, 416.0f, 0.1f));
+
+    const bool dbl_tl =
+            (float_near(v[0].x, 6.0f, 0.1f) || float_near(v[0].x, 11.0f, 0.1f))
+            && v[0].y >= 23.9f && v[0].y <= 28.0f
+            && (float_near(v[1].x, 137.0f, 0.1f) || float_near(v[1].x, 147.0f, 0.1f))
+            && v[1].y >= 23.9f && v[1].y <= 28.0f
+            && (float_near(v[2].x, 137.0f, 0.1f) || float_near(v[2].x, 147.0f, 0.1f))
+            && (float_near(v[2].y, 192.0f, 0.1f) || (v[2].y >= 212.0f && v[2].y <= 216.0f))
+            && (float_near(v[3].x, 6.0f, 0.1f) || float_near(v[3].x, 11.0f, 0.1f))
+            && (float_near(v[3].y, 192.0f, 0.1f) || (v[3].y >= 212.0f && v[3].y <= 216.0f));
+
+    const bool dbl_bl =
+            (float_near(v[0].x, 6.0f, 0.1f) || float_near(v[0].x, 11.0f, 0.1f))
+            && (float_near(v[0].y, 200.0f, 0.1f) || float_near(v[0].y, 206.0f, 0.1f)
+                    || (v[0].y >= 216.0f && v[0].y <= 220.0f))
+            && (float_near(v[1].x, 137.0f, 0.1f) || float_near(v[1].x, 147.0f, 0.1f))
+            && (float_near(v[1].y, 200.0f, 0.1f) || float_near(v[1].y, 206.0f, 0.1f)
+                    || (v[1].y >= 216.0f && v[1].y <= 220.0f))
+            && (float_near(v[2].x, 137.0f, 0.1f) || float_near(v[2].x, 147.0f, 0.1f))
+            && (float_near(v[2].y, 368.0f, 0.1f) || float_near(v[2].y, 394.0f, 0.1f)
+                    || (v[2].y >= 404.0f && v[2].y <= 408.0f))
+            && (float_near(v[3].x, 6.0f, 0.1f) || float_near(v[3].x, 11.0f, 0.1f))
+            && (float_near(v[3].y, 368.0f, 0.1f) || float_near(v[3].y, 394.0f, 0.1f)
+                    || (v[3].y >= 404.0f && v[3].y <= 408.0f));
+
+    const bool dbl_tr =
+            ((v[0].x >= 493.0f && v[0].x <= 494.0f) || float_near(v[0].x, 500.0f, 0.1f))
+            && v[0].y >= 23.9f && v[0].y <= 28.0f
+            && (float_near(v[1].x, 626.0f, 0.1f) || (v[1].x >= 634.0f && v[1].x <= 635.0f))
+            && v[1].y >= 23.9f && v[1].y <= 28.0f
+            && (float_near(v[2].x, 626.0f, 0.1f) || (v[2].x >= 634.0f && v[2].x <= 635.0f))
+            && (float_near(v[2].y, 192.0f, 0.1f) || (v[2].y >= 212.0f && v[2].y <= 216.0f))
+            && ((v[3].x >= 493.0f && v[3].x <= 494.0f) || float_near(v[3].x, 500.0f, 0.1f))
+            && (float_near(v[3].y, 192.0f, 0.1f) || (v[3].y >= 212.0f && v[3].y <= 216.0f));
+
+    const bool dbl_br =
+            ((v[0].x >= 493.0f && v[0].x <= 494.0f) || float_near(v[0].x, 500.0f, 0.1f))
+            && (float_near(v[0].y, 200.0f, 0.1f) || float_near(v[0].y, 206.0f, 0.1f)
+                    || (v[0].y >= 216.0f && v[0].y <= 220.0f))
+            && (float_near(v[1].x, 626.0f, 0.1f) || (v[1].x >= 634.0f && v[1].x <= 635.0f))
+            && (float_near(v[1].y, 200.0f, 0.1f) || float_near(v[1].y, 206.0f, 0.1f)
+                    || (v[1].y >= 216.0f && v[1].y <= 220.0f))
+            && (float_near(v[2].x, 626.0f, 0.1f) || (v[2].x >= 634.0f && v[2].x <= 635.0f))
+            && (float_near(v[2].y, 368.0f, 0.1f) || float_near(v[2].y, 394.0f, 0.1f)
+                    || (v[2].y >= 404.0f && v[2].y <= 408.0f))
+            && ((v[3].x >= 493.0f && v[3].x <= 494.0f) || float_near(v[3].x, 500.0f, 0.1f))
+            && (float_near(v[3].y, 368.0f, 0.1f) || float_near(v[3].y, 394.0f, 0.1f)
+                    || (v[3].y >= 404.0f && v[3].y <= 408.0f));
+
+    if (single || dbl_tl || dbl_bl || dbl_tr || dbl_br) {
+        v[0].tu = 0.0f + 1.0f / 512;
+        v[0].tv = 1.0f;
+        v[1].tu = 1.0f;
+        v[1].tv = 1.0f;
+        v[2].tu = 1.0f;
+        v[2].tv = 0.0f + 1.0f / 512;
+        v[3].tu = 0.0f + 1.0f / 512;
+        v[3].tv = 0.0f + 1.0f / 512;
+        return out4;
+    }
+
+    return data;
+}
+
+} // namespace
 
 // maps arena's cached additional swap chains (SMALL, LEFT, RIGHT) to screen numbers.
 // MAIN is the implicit swap chain, is not in those slots, and is always screen 0.
@@ -1477,6 +1603,15 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::SetRenderState(
         DWORD Value)
 {
     WRAP_DEBUG;
+    // bemanitools: IIDX12 song-select fog + IIDX13 song-select lighting break BG
+    if (State == D3DRS_FOGENABLE && Value != FALSE
+            && avs::game::is_model("ECO")) {
+        Value = FALSE;
+    }
+    if (State == D3DRS_LIGHTING && Value != FALSE
+            && avs::game::is_model("FDD")) {
+        Value = FALSE;
+    }
     CHECK_RESULT(pReal->SetRenderState(State, Value));
 }
 
@@ -1700,9 +1835,13 @@ HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::DrawPrimitiveUP(
     if (d3d9_live2d::should_skip_draw()) [[unlikely]] {
         return D3D_OK;
     }
+    IidxBgVertex bg_copy[4] {};
+    const void *data = fix_iidx_bg_video_uvs(
+            PrimitiveType, PrimitiveCount, pVertexStreamZeroData,
+            VertexStreamZeroStride, bg_copy);
     CHECK_RESULT(pReal->DrawPrimitiveUP(
             PrimitiveType, PrimitiveCount,
-            pVertexStreamZeroData, VertexStreamZeroStride));
+            data, VertexStreamZeroStride));
 }
 
 HRESULT STDMETHODCALLTYPE WrappedIDirect3DDevice9::DrawIndexedPrimitiveUP(
