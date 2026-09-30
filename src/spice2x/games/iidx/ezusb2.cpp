@@ -679,7 +679,17 @@ bool interrupt_read(LPVOID lpOutBuffer, DWORD nOutBufferSize) {
     InterruptReadPacket msg {};
     msg.inverted_pad = build_iidx_pad();
     msg.status = g_status;
-    g_status = 0;
+    // GOLD's FPGA loader polls again without resending the command. Its IO
+    // worker already drained the one-shot 0x41/0x43, so leave those latched
+    // until the next interrupt write overwrites g_status. Other models still
+    // need the clear for EEPROM/security one-shot replies.
+    const bool latch_fpga = avs::game::is_model("GLD")
+            && (g_status == FPGA_INIT_OK
+                    || g_status == FPGA_CHECK_OK
+                    || g_status == FPGA_WRITE_OK);
+    if (!latch_fpga) {
+        g_status = 0;
+    }
     msg.p2_turntable = get_tt(1, false);
     msg.p1_turntable = get_tt(0, false);
     msg.seq_no = g_seq_no++;
