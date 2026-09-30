@@ -128,6 +128,7 @@ namespace avs {
             log_info("avs-ea3", "loading DLL");
 
             // detect DLL name
+            bool reuse_core = false;
             if (fileutils::file_exists(MODULE_PATH / "avs2-ea3.dll")) {
                 DLL_NAME = "avs2-ea3.dll";
             } else {
@@ -138,28 +139,43 @@ namespace avs {
 #endif
 
                 if (!fileutils::file_exists(MODULE_PATH / DLL_NAME)) {
-                    std::string info_str { fmt::format(
-                        "\n\n"
-                        "Failed to find critical ea3 DLL on disk (avs2-ea3.dll OR {})\n"
-                        "Looked in the following directory: {}\n"
-                        "\n"
-                        "One of these is required to boot the game. Spice found neither of them. You do not need both, just one, next to your game DLL.\n"
-                        "\n"
-                        "HOW TO FIX:\n"
-                        "    * Avoid manually specifying DLL path (-exec) and module directory (-modules); let spice2x auto-detect unless you have a good reason not to\n"
-                        "    * Ensure you do NOT have multiple copies of the game DLLs (e.g., in contents and in contents\\modules)\n"
-                        "    * It's also possible that you have incomplete game data\n"
-                        "    * Do NOT copy over random DLLs from another game installation; DLL must match game version\n"
-                        "\n"
-                    , DLL_NAME, MODULE_PATH) };
+                    // Gold / DJ Troopers era: ea3_boot lives inside libavs-win32.dll
+                    // (the same file core already loaded). Only reuse it when the
+                    // legacy export is actually present.
+                    if (core::DLL_INSTANCE != nullptr
+                            && GetProcAddress(core::DLL_INSTANCE, IMPORT_LEGACY.boot) != nullptr) {
+                        DLL_NAME = core::DLL_NAME;
+                        reuse_core = true;
+                        log_info("avs-ea3", "no split ea3 DLL; using {} (ea3_boot in core)",
+                                DLL_NAME);
+                    } else {
+                        std::string info_str { fmt::format(
+                            "\n\n"
+                            "Failed to find critical ea3 DLL on disk (avs2-ea3.dll OR {})\n"
+                            "Looked in the following directory: {}\n"
+                            "\n"
+                            "One of these is required to boot the game. Spice found neither of them. You do not need both, just one, next to your game DLL.\n"
+                            "\n"
+                            "HOW TO FIX:\n"
+                            "    * Avoid manually specifying DLL path (-exec) and module directory (-modules); let spice2x auto-detect unless you have a good reason not to\n"
+                            "    * Ensure you do NOT have multiple copies of the game DLLs (e.g., in contents and in contents\\modules)\n"
+                            "    * It's also possible that you have incomplete game data\n"
+                            "    * Do NOT copy over random DLLs from another game installation; DLL must match game version\n"
+                            "\n"
+                        , DLL_NAME, MODULE_PATH) };
 
-                    log_warning("avs-ea3", "{}", info_str);
-                    log_fatal("avs-ea3", "Failed to find critical ea3 DLL on disk (avs2-ea3.dll OR {})", DLL_NAME);
+                        log_warning("avs-ea3", "{}", info_str);
+                        log_fatal("avs-ea3", "Failed to find critical ea3 DLL on disk (avs2-ea3.dll OR {})", DLL_NAME);
+                    }
                 }
             }
 
-            // load library
-            DLL_INSTANCE = libutils::load_library(MODULE_PATH / DLL_NAME);
+            // load library (or reuse the already-loaded core module)
+            if (reuse_core) {
+                DLL_INSTANCE = core::DLL_INSTANCE;
+            } else {
+                DLL_INSTANCE = libutils::load_library(MODULE_PATH / DLL_NAME);
+            }
 
             // check by version string
             std::optional<size_t> ver;
