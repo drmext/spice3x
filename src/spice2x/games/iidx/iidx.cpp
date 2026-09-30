@@ -405,11 +405,11 @@ namespace games::iidx {
 
             if (is_io2_inject) {
                 // Settings, backup and avs_conf live on d:\, e:\ and f:\.
-                // 9-12 avs.dll opens e:\avs00000.bin / f:\avs00000.bin via
-                // CreateFileA; PEB IAT walk alone misses that call site, so
-                // trampoline kernel32 so every module hits the remap.
+                // avs.dll DllMain opens e:\avs00000.bin before this runs; the
+                // injector hooks NtCreateFile first. This IAT remap covers
+                // later CreateFile calls. Do not trampoline all of kernel32:
+                // that re-enters CloseHandle/ReadFile and pins the process.
                 hooks::device::REMAP_SETTINGS_DRIVES = true;
-                devicehook_init_trampoline();
             }
             devicehook_init();
             if (is_io2_inject) {

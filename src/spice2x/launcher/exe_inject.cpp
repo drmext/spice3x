@@ -1,5 +1,6 @@
 #include "exe_inject.h"
 
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -336,6 +337,271 @@ namespace launcher {
         return true;
     }
 
+    // avs.dll (IIDX 10-13) creates e:\avs00000.bin / f:\avs00000.bin from DllMain,
+    // which runs inside the loader before spice_exe_init. Patch ntdll!NtCreateFile
+    // while the process is still suspended so that open is redirected.
+    static bool install_early_drive_hook(HANDLE process, const std::filesystem::path &work_dir) {
+        std::error_code ec;
+        std::filesystem::create_directories(work_dir / "d", ec);
+        std::filesystem::create_directories(work_dir / "e", ec);
+        std::filesystem::create_directories(work_dir / "f", ec);
+
+        HMODULE local_ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (!local_ntdll) {
+            log_warning("exe-inject", "ntdll not loaded; drive redirect not installed");
+            return false;
+        }
+        auto *nt = reinterpret_cast<uint8_t *>(GetProcAddress(local_ntdll, "NtCreateFile"));
+        if (!nt) {
+            log_warning("exe-inject", "NtCreateFile not found; drive redirect not installed");
+            return false;
+        }
+
+        uint8_t stub[16] {};
+        SIZE_T read = 0;
+        if (!ReadProcessMemory(process, nt, stub, sizeof(stub), &read) || read != sizeof(stub)) {
+            log_warning("exe-inject", "failed to read remote NtCreateFile");
+            return false;
+        }
+        // mov eax, imm32; mov edx, imm32; call edx; ret 0x2C
+        if (stub[0] != 0xB8 || stub[5] != 0xBA || stub[10] != 0xFF || stub[11] != 0xD2
+                || stub[12] != 0xC2 || stub[13] != 0x2C || stub[14] != 0x00) {
+            log_warning("exe-inject", "unexpected NtCreateFile stub; drive redirect not installed");
+            return false;
+        }
+        const uint32_t syscall_num = *reinterpret_cast<uint32_t *>(stub + 1);
+        const uint32_t wow64_gate = *reinterpret_cast<uint32_t *>(stub + 6);
+
+        std::wstring prefix = L"\\??\\";
+        prefix += std::filesystem::absolute(work_dir).wstring();
+        for (wchar_t &ch : prefix) {
+            if (ch == L'/') {
+                ch = L'\\';
+            }
+        }
+        if (prefix.empty() || prefix.back() != L'\\') {
+            prefix.push_back(L'\\');
+        }
+        if (prefix.size() + 8 >= 512) {
+            log_warning("exe-inject", "game path too long for drive redirect");
+            return false;
+        }
+
+        constexpr uint32_t kCaveSize = 0x2000;
+        constexpr uint32_t kNewPath = 0x800;
+        constexpr uint32_t kPrefix = 0x1000;
+        constexpr uint32_t kLock = 0x1400;
+        constexpr uint32_t kHeld = 0x1401;
+        constexpr uint32_t kSavedUstr = 0x1404;
+        constexpr uint32_t kSavedLen = 0x1408;
+        constexpr uint32_t kSavedMax = 0x140A;
+        constexpr uint32_t kSavedBuf = 0x140C;
+
+        void *cave = VirtualAllocEx(process, nullptr, kCaveSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!cave) {
+            log_warning("exe-inject", "VirtualAllocEx for drive hook failed: {}", GetLastError());
+            return false;
+        }
+        const auto cave_addr = reinterpret_cast<uintptr_t>(cave);
+        const uint32_t newpath = static_cast<uint32_t>(cave_addr + kNewPath);
+        const uint32_t prefix_addr = static_cast<uint32_t>(cave_addr + kPrefix);
+        const uint32_t lock_addr = static_cast<uint32_t>(cave_addr + kLock);
+        const uint32_t held_addr = static_cast<uint32_t>(cave_addr + kHeld);
+        const uint32_t saved_ustr = static_cast<uint32_t>(cave_addr + kSavedUstr);
+        const uint32_t saved_len = static_cast<uint32_t>(cave_addr + kSavedLen);
+        const uint32_t saved_max = static_cast<uint32_t>(cave_addr + kSavedMax);
+        const uint32_t saved_buf = static_cast<uint32_t>(cave_addr + kSavedBuf);
+        const uint32_t prefix_wchars = static_cast<uint32_t>(prefix.size());
+        const uint32_t rest_limit = 1024 - prefix_wchars - 2;
+
+        std::vector<uint8_t> code;
+        code.reserve(256);
+        auto u8 = [&](uint8_t v) { code.push_back(v); };
+        auto u16 = [&](uint16_t v) {
+            code.push_back(static_cast<uint8_t>(v));
+            code.push_back(static_cast<uint8_t>(v >> 8));
+        };
+        auto u32 = [&](uint32_t v) {
+            code.push_back(static_cast<uint8_t>(v));
+            code.push_back(static_cast<uint8_t>(v >> 8));
+            code.push_back(static_cast<uint8_t>(v >> 16));
+            code.push_back(static_cast<uint8_t>(v >> 24));
+        };
+        std::vector<std::pair<size_t, const char *>> fixups;
+        // Near conditional/unconditional jumps so the pass path can sit past 127 bytes.
+        auto j32 = [&](uint8_t short_op, const char *label) {
+            if (short_op == 0xEB) {
+                u8(0xE9);
+            } else {
+                u8(0x0F);
+                u8(static_cast<uint8_t>(short_op + 0x10));
+            }
+            u32(0);
+            fixups.emplace_back(code.size() - 4, label);
+        };
+        std::vector<std::pair<const char *, size_t>> labels;
+        auto lab = [&](const char *name) { labels.emplace_back(name, code.size()); };
+
+        // pushad. ObjectAttributes is at [esp+44].
+        u8(0x60);
+        u8(0x8B); u8(0x44); u8(0x24); u8(44);
+        u8(0x85); u8(0xC0);
+        j32(0x74, "pass");
+        u8(0x83); u8(0x78); u8(0x04); u8(0x00);
+        j32(0x75, "pass");
+        u8(0x8B); u8(0x70); u8(0x08);
+        u8(0x85); u8(0xF6);
+        j32(0x74, "pass");
+        u8(0x0F); u8(0xB7); u8(0x0E);
+        u8(0x83); u8(0xF9); u8(14);
+        j32(0x72, "pass");
+        u8(0x8B); u8(0x56); u8(0x04);
+        u8(0x85); u8(0xD2);
+        j32(0x74, "pass");
+        u8(0x81); u8(0x3A); u32(0x005C005C);
+        j32(0x75, "pass");
+        u8(0x81); u8(0x7A); u8(0x04); u32(0x003F003F);
+        j32(0x75, "pass");
+        u8(0x66); u8(0x81); u8(0x7A); u8(0x08); u16(0x005C);
+        j32(0x75, "pass");
+        u8(0x0F); u8(0xB7); u8(0x5A); u8(10);
+        u8(0x66); u8(0x83); u8(0xFB); u8(static_cast<uint8_t>('A'));
+        j32(0x72, "lower_done");
+        u8(0x66); u8(0x83); u8(0xFB); u8(static_cast<uint8_t>('Z'));
+        j32(0x77, "lower_done");
+        u8(0x66); u8(0x83); u8(0xC3); u8(32);
+        lab("lower_done");
+        u8(0x66); u8(0x83); u8(0xFB); u8(static_cast<uint8_t>('d'));
+        j32(0x72, "pass");
+        u8(0x66); u8(0x83); u8(0xFB); u8(static_cast<uint8_t>('f'));
+        j32(0x77, "pass");
+        u8(0x66); u8(0x81); u8(0x7A); u8(12); u16(static_cast<uint16_t>(':'));
+        j32(0x75, "pass");
+        // ebp = UNICODE_STRING (saved across the copy)
+        u8(0x89); u8(0xF5);
+        u8(0xBF); u32(lock_addr);
+        lab("spin");
+        u8(0x31); u8(0xC0);
+        u8(0x40);
+        u8(0x86); u8(0x07);
+        u8(0x84); u8(0xC0);
+        j32(0x75, "spin");
+        u8(0x0F); u8(0xB7); u8(0x4D); u8(0x00);
+        u8(0x83); u8(0xE9); u8(14);
+        u8(0xD1); u8(0xE9);
+        u8(0x81); u8(0xF9); u32(rest_limit);
+        j32(0x73, "unlock_pass");
+        // ecx is the remaining wchar count; keep it across the prefix copy.
+        u8(0x51);
+        // save caller's UNICODE_STRING fields
+        u8(0x66); u8(0x8B); u8(0x45); u8(0x00);
+        u8(0x66); u8(0xA3); u32(saved_len);
+        u8(0x66); u8(0x8B); u8(0x45); u8(0x02);
+        u8(0x66); u8(0xA3); u32(saved_max);
+        u8(0x8B); u8(0x45); u8(0x04);
+        u8(0xA3); u32(saved_buf);
+        u8(0x89); u8(0x2D); u32(saved_ustr);
+        u8(0xFC);
+        u8(0xBF); u32(newpath);
+        u8(0xBE); u32(prefix_addr);
+        u8(0xB9); u32(prefix_wchars);
+        u8(0xF3); u8(0x66); u8(0xA5);
+        u8(0x66); u8(0x89); u8(0xD8);
+        u8(0x66); u8(0xAB);
+        u8(0x59);
+        u8(0x8B); u8(0x75); u8(0x04);
+        u8(0x83); u8(0xC6); u8(14);
+        u8(0xF3); u8(0x66); u8(0xA5);
+        u8(0x31); u8(0xC0);
+        u8(0x66); u8(0xAB);
+        u8(0x89); u8(0xF8);
+        u8(0x2D); u32(newpath + 2);
+        u8(0x66); u8(0x89); u8(0x45); u8(0x00);
+        u8(0x83); u8(0xC0); u8(2);
+        u8(0x66); u8(0x89); u8(0x45); u8(0x02);
+        u8(0xC7); u8(0x45); u8(0x04); u32(newpath);
+        u8(0xC6); u8(0x05); u32(held_addr); u8(1);
+        j32(0xEB, "go");
+        lab("unlock_pass");
+        u8(0xC6); u8(0x05); u32(lock_addr); u8(0);
+        lab("pass");
+        u8(0xC6); u8(0x05); u32(held_addr); u8(0);
+        lab("go");
+        u8(0x61);
+        u8(0xB8); u32(syscall_num);
+        u8(0xBA); u32(wow64_gate);
+        u8(0xFF); u8(0xD2);
+        u8(0x50);
+        u8(0x80); u8(0x3D); u32(held_addr); u8(0);
+        j32(0x74, "norestore");
+        u8(0x8B); u8(0x0D); u32(saved_ustr);
+        u8(0x66); u8(0xA1); u32(saved_len);
+        u8(0x66); u8(0x89); u8(0x01);
+        u8(0x66); u8(0xA1); u32(saved_max);
+        u8(0x66); u8(0x89); u8(0x41); u8(0x02);
+        u8(0xA1); u32(saved_buf);
+        u8(0x89); u8(0x41); u8(0x04);
+        u8(0xC6); u8(0x05); u32(lock_addr); u8(0);
+        u8(0xC6); u8(0x05); u32(held_addr); u8(0);
+        lab("norestore");
+        u8(0x58);
+        u8(0xC2); u8(0x2C); u8(0x00);
+
+        for (const auto &fix : fixups) {
+            size_t target = static_cast<size_t>(-1);
+            for (const auto &label : labels) {
+                if (strcmp(label.first, fix.second) == 0) {
+                    target = label.second;
+                    break;
+                }
+            }
+            if (target == static_cast<size_t>(-1)) {
+                log_warning("exe-inject", "drive hook missing label {}", fix.second);
+                VirtualFreeEx(process, cave, 0, MEM_RELEASE);
+                return false;
+            }
+            const int32_t rel = static_cast<int32_t>(target) - static_cast<int32_t>(fix.first + 4);
+            memcpy(code.data() + fix.first, &rel, sizeof(rel));
+        }
+
+        std::vector<uint8_t> image(kCaveSize, 0);
+        if (code.size() >= kNewPath) {
+            log_warning("exe-inject", "drive hook code overflow");
+            VirtualFreeEx(process, cave, 0, MEM_RELEASE);
+            return false;
+        }
+        memcpy(image.data(), code.data(), code.size());
+        memcpy(image.data() + kPrefix, prefix.data(), prefix.size() * sizeof(wchar_t));
+
+        SIZE_T written = 0;
+        if (!WriteProcessMemory(process, cave, image.data(), image.size(), &written) || written != image.size()) {
+            log_warning("exe-inject", "failed to write drive hook");
+            VirtualFreeEx(process, cave, 0, MEM_RELEASE);
+            return false;
+        }
+
+        DWORD old_protect = 0;
+        if (!VirtualProtectEx(process, nt, 5, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            log_warning("exe-inject", "VirtualProtectEx NtCreateFile failed: {}", GetLastError());
+            VirtualFreeEx(process, cave, 0, MEM_RELEASE);
+            return false;
+        }
+        uint8_t jmp[5] = {0xE9, 0, 0, 0, 0};
+        const auto nt_addr = reinterpret_cast<uintptr_t>(nt);
+        const int32_t rel = static_cast<int32_t>(cave_addr - (nt_addr + 5));
+        memcpy(jmp + 1, &rel, sizeof(rel));
+        if (!WriteProcessMemory(process, nt, jmp, sizeof(jmp), &written) || written != sizeof(jmp)) {
+            log_warning("exe-inject", "failed to patch NtCreateFile");
+            VirtualProtectEx(process, nt, 5, old_protect, &old_protect);
+            VirtualFreeEx(process, cave, 0, MEM_RELEASE);
+            return false;
+        }
+        VirtualProtectEx(process, nt, 5, old_protect, &old_protect);
+        FlushInstructionCache(process, nt, 5);
+        log_info("exe-inject", "NtCreateFile drive redirect installed for {}", work_dir.string());
+        return true;
+    }
+
     static bool remote_load_library(HANDLE process, const std::filesystem::path &dll_path,
             HMODULE *remote_module) {
         const auto path_w = dll_path.wstring();
@@ -482,6 +748,10 @@ namespace launcher {
         }
 
         log_info("exe-inject", "created suspended process pid={}", pi.dwProcessId);
+
+        // Before LoadLibrary: the loader runs avs.dll DllMain, which creates
+        // e:\avs00000.bin / f:\avs00000.bin. Redirect that open first.
+        install_early_drive_hook(pi.hProcess, target.work_dir);
 
         HMODULE remote_module = nullptr;
         if (!remote_load_library(pi.hProcess, temp_dll, &remote_module)) {
