@@ -28,12 +28,13 @@ static decltype(GetOEMCP) *GetOEMCP_orig = nullptr;
 static decltype(MultiByteToWideChar) *MultiByteToWideChar_orig = nullptr;
 static decltype(WideCharToMultiByte) *WideCharToMultiByte_orig = nullptr;
 static decltype(GetLocaleInfoEx) *GetLocaleInfoEx_orig = nullptr;
+static decltype(GetLocaleInfoA) *GetLocaleInfoA_orig = nullptr;
+static decltype(GetLocaleInfoW) *GetLocaleInfoW_orig = nullptr;
 
 #ifdef SPICE64
 static decltype(GetSystemDefaultLCID) *GetSystemDefaultLCID_orig = nullptr;
 static decltype(IsDBCSLeadByte) *IsDBCSLeadByte_orig = nullptr;
 static decltype(IsDBCSLeadByteEx) *IsDBCSLeadByteEx_orig = nullptr;
-static decltype(GetLocaleInfoA) *GetLocaleInfoA_orig = nullptr;
 static decltype(GetThreadLocale) *GetThreadLocale_orig = nullptr;
 #endif
 
@@ -246,11 +247,7 @@ WideCharToMultiByte_hook(
         lpUsedDefaultChar);
 }
 
-#ifdef SPICE64
-
-int
-WINAPI
-GetLocaleInfoA_hook(
+static int WINAPI GetLocaleInfoA_hook(
     LCID Locale,
     LCTYPE LCType,
     LPSTR lpLCData,
@@ -268,12 +265,32 @@ GetLocaleInfoA_hook(
         strcpy(lpLCData, "JP");
         return 3;
     }
-    
+
     log_misc("hooks::lang", "GetLocaleInfoA_hook hit, {:#x}, {:#x}", Locale, LCType);
     return GetLocaleInfoA_orig(Locale, LCType, lpLCData, cchData);
 }
 
-#endif
+static int WINAPI GetLocaleInfoW_hook(
+    LCID Locale,
+    LCTYPE LCType,
+    LPWSTR lpLCData,
+    int cchData) {
+
+    if (LCType == LOCALE_SISO639LANGNAME && lpLCData != NULL && cchData >= 3) {
+        log_misc("hooks::lang", "GetLocaleInfoW_hook hit ({:#x}, LOCALE_SISO639LANGNAME), return `ja`", Locale);
+        wcscpy(lpLCData, L"ja");
+        return 3;
+    }
+
+    if (LCType == LOCALE_SISO3166CTRYNAME && lpLCData != NULL && cchData >= 3) {
+        log_misc("hooks::lang",
+                 "GetLocaleInfoW_hook hit ({:#x}, LOCALE_SISO3166CTRYNAME), return `JP`", Locale);
+        wcscpy(lpLCData, L"JP");
+        return 3;
+    }
+
+    return GetLocaleInfoW_orig(Locale, LCType, lpLCData, cchData);
+}
 
 void hooks::lang::early_init() {
     log_info("hooks::lang", "early initialization");
@@ -359,6 +376,33 @@ void hooks::lang::early_init() {
 
 #endif
 
+    // IIDX 9-13: avs.dll (and the exe) convert Shift-JIS via CP_ACP / locale APIs.
+    // Trampoline so statically imported avs.dll is covered, not only bm2dx.exe IAT.
+    const bool is_c02_era = avs::game::is_model({"C02", "D01", "E11", "ECO", "FDD"});
+    if (is_c02_era) {
+        log_info("hooks::lang", "hooking MultiByteToWideChar / WideCharToMultiByte / GetLocaleInfo for IIDX 9-13");
+        detour::trampoline_try(
+            "kernel32.dll",
+            "MultiByteToWideChar",
+            MultiByteToWideChar_hook,
+            &MultiByteToWideChar_orig);
+        detour::trampoline_try(
+            "kernel32.dll",
+            "WideCharToMultiByte",
+            WideCharToMultiByte_hook,
+            &WideCharToMultiByte_orig);
+        detour::trampoline_try(
+            "kernel32.dll",
+            "GetLocaleInfoA",
+            GetLocaleInfoA_hook,
+            &GetLocaleInfoA_orig);
+        detour::trampoline_try(
+            "kernel32.dll",
+            "GetLocaleInfoW",
+            GetLocaleInfoW_hook,
+            &GetLocaleInfoW_orig);
+    }
+
 #ifdef SPICE64
     // NDD renders through GetTextExtentPoint32A, so its wide strings go back through CP_ACP first
     const auto hook_wide_char_to_multi_byte =
@@ -368,7 +412,7 @@ void hooks::lang::early_init() {
     const auto hook_wide_char_to_multi_byte = avs::game::is_model({ "K32", "K33" });
 #endif
 
-    if (hook_wide_char_to_multi_byte) {
+    if (hook_wide_char_to_multi_byte && !WideCharToMultiByte_orig) {
         log_info("hooks::lang", "hooking WideCharToMultiByte");
         detour::trampoline_try(
             "kernel32.dll",
@@ -384,11 +428,15 @@ void hooks::lang::init() {
 
     detour::iat_try("RtlMultiByteToUnicodeN", RtlMultiByteToUnicodeN_hook, nullptr, "ntdll.dll");
 
-    MultiByteToWideChar_orig = detour::iat_try(
+    // Preserve MinHook trampoline orig if early_init already installed it.
+    auto *prev = detour::iat_try(
             "MultiByteToWideChar",
             MultiByteToWideChar_hook,
             nullptr,
             "kernel32.dll");
+    if (!MultiByteToWideChar_orig && prev) {
+        MultiByteToWideChar_orig = prev;
+    }
 }
 
 void hooks::lang::init_module(HMODULE module) {

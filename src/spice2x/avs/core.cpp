@@ -1569,12 +1569,35 @@ namespace avs {
 
             // load functions
             avs::core::IMPORT_NAMES = IMPORTS[ver];
-            avs215_boot = libutils::get_proc<AVS215_BOOT_T>(
-                    DLL_INSTANCE, IMPORTS[ver].boot);
-            avs216_boot = libutils::get_proc<AVS216_BOOT_T>(
-                    DLL_INSTANCE, IMPORTS[ver].boot);
-            avs_shutdown = libutils::get_proc<AVS_SHUTDOWN_T>(
-                    DLL_INSTANCE, IMPORTS[ver].shutdown);
+            // FDD (and some other legacy inject builds) match AVSLEGACY via
+            // property_search but do not export avs_boot / avs_shutdown /
+            // property_read_query_memsize. Injected boot never calls those; it
+            // only needs property_* + ea3_boot for network rewriting.
+            if (VERSION == AVSLEGACY) {
+                avs215_boot = libutils::try_proc<AVS215_BOOT_T>(
+                        DLL_INSTANCE, IMPORTS[ver].boot);
+                avs216_boot = libutils::try_proc<AVS216_BOOT_T>(
+                        DLL_INSTANCE, IMPORTS[ver].boot);
+                avs_shutdown = libutils::try_proc<AVS_SHUTDOWN_T>(
+                        DLL_INSTANCE, IMPORTS[ver].shutdown);
+                if (!avs215_boot && !avs216_boot) {
+                    log_info("avs-core",
+                            "{} is not exported; spice will not call avs boot",
+                            IMPORTS[ver].boot);
+                }
+                if (!avs_shutdown) {
+                    log_info("avs-core",
+                            "{} is not exported; spice will not call avs shutdown",
+                            IMPORTS[ver].shutdown);
+                }
+            } else {
+                avs215_boot = libutils::get_proc<AVS215_BOOT_T>(
+                        DLL_INSTANCE, IMPORTS[ver].boot);
+                avs216_boot = libutils::get_proc<AVS216_BOOT_T>(
+                        DLL_INSTANCE, IMPORTS[ver].boot);
+                avs_shutdown = libutils::get_proc<AVS_SHUTDOWN_T>(
+                        DLL_INSTANCE, IMPORTS[ver].shutdown);
+            }
             property_node_create = libutils::get_proc<PROPERTY_NODE_CREATE_T>(
                     DLL_INSTANCE, IMPORTS[ver].property_node_create);
             // IIDX 17 libavs-win32.dll matches legacy via property_search, but it
@@ -1602,8 +1625,18 @@ namespace avs {
                     DLL_INSTANCE, IMPORTS[ver].property_node_refer);
             property_node_remove = libutils::get_proc<PROPERTY_NODE_REMOVE_T>(
                     DLL_INSTANCE, IMPORTS[ver].property_node_remove);
-            property_read_query_memsize = libutils::get_proc<PROPERTY_READ_QUERY_MEMSIZE_T>(
-                    DLL_INSTANCE, IMPORTS[ver].property_read_query_memsize);
+            if (VERSION == AVSLEGACY) {
+                property_read_query_memsize = libutils::try_proc<PROPERTY_READ_QUERY_MEMSIZE_T>(
+                        DLL_INSTANCE, IMPORTS[ver].property_read_query_memsize);
+                if (!property_read_query_memsize) {
+                    log_info("avs-core",
+                            "{} is not exported; spice will not parse avs configs",
+                            IMPORTS[ver].property_read_query_memsize);
+                }
+            } else {
+                property_read_query_memsize = libutils::get_proc<PROPERTY_READ_QUERY_MEMSIZE_T>(
+                        DLL_INSTANCE, IMPORTS[ver].property_read_query_memsize);
+            }
             property_search = libutils::get_proc<PROPERTY_SEARCH_T>(
                     DLL_INSTANCE, IMPORTS[ver].property_search);
             avs_std_setenv = libutils::get_proc<STD_SETENV_T>(
@@ -2102,6 +2135,9 @@ namespace avs {
                 }
                 case AVS21360:
                 case AVSLEGACY: {
+                    if (!avs215_boot) {
+                        log_fatal("avs-core", "avs_boot is not exported; cannot boot AVS");
+                    }
                     AVS_HEAP1 = malloc(HEAP_SIZE);
                     if (!AVS_HEAP1) {
                         log_warning("avs-core", "could not allocate heap 1");
@@ -2160,7 +2196,9 @@ namespace avs {
             log_info("avs-core", "shutdown");
 
             // call shutdown
-            avs_shutdown();
+            if (avs_shutdown) {
+                avs_shutdown();
+            }
 
             // clean heaps
             if (AVS_HEAP1) {

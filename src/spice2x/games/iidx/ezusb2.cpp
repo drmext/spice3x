@@ -334,6 +334,20 @@ const char *black_mcode() {
     return "GCJDJJAA";
 }
 
+// sec.boot_seeds for roundplug v1 (9-13). Boot version stays GEC02 for all.
+const uint32_t *boot_seeds_v1() {
+    static constexpr uint32_t kC02[3] = {0, 0, 0};
+    static constexpr uint32_t kD01[3] = {0, 1, 1};
+    static constexpr uint32_t kE11[3] = {0, 2, 2};
+    static constexpr uint32_t kECO[3] = {0, 3, 3};
+    static constexpr uint32_t kFDD[3] = {0, 4, 4};
+    if (avs::game::is_model("D01")) return kD01;
+    if (avs::game::is_model("E11")) return kE11;
+    if (avs::game::is_model("ECO")) return kECO;
+    if (avs::game::is_model("FDD")) return kFDD;
+    return kC02;
+}
+
 SecurityId g_pcbid {};
 SecurityId g_eamid {};
 bool g_ids_ready = false;
@@ -546,14 +560,15 @@ bool read_secplug_packet(BulkPacket *pkg) {
     pkg->node = 0x12;
     pkg->page = 0x00;
     if (is_c02_era()) {
-        // Roundplug v1: boot version GEC02 + seeds 0:0:0
+        // Roundplug v1: boot version is always GEC02; seeds match bemanitools
+        // sec.boot_seeds per title (C02 0:0:0 … FDD 0:4:4).
         constexpr char kBootVersion[8] = {'G', 'E', 'C', '0', '2', ' ', ' ', ' '};
-        constexpr uint32_t kBootSeeds[3] = {0, 0, 0};
+        const uint32_t *boot_seeds = boot_seeds_v1();
         security::RpEeprom eeprom {};
         uint8_t id_bytes[10];
         memcpy(id_bytes, &id, sizeof(id_bytes));
         security::rp_generate_signed_eeprom(
-                kBootVersion, kBootSeeds, black_mcode(), id_bytes, &eeprom);
+                kBootVersion, boot_seeds, black_mcode(), id_bytes, &eeprom);
         memcpy(pkg->payload, &eeprom, sizeof(eeprom));
         // Mirror bemanitools: write signature into EEPROM for the game's compare
         ensure_eeprom();

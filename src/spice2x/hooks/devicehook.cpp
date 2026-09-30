@@ -25,6 +25,7 @@ static std::string PATH_HARD_CODE_COMPARE = "d:/###-###/contents";
 static decltype(ClearCommBreak) *ClearCommBreak_orig = nullptr;
 static decltype(ClearCommError) *ClearCommError_orig = nullptr;
 static decltype(CloseHandle) *CloseHandle_orig = nullptr;
+static decltype(CopyFileA) *CopyFileA_orig = nullptr;
 static decltype(CreateFileA) *CreateFileA_orig = nullptr;
 static decltype(CreateFileW) *CreateFileW_orig = nullptr;
 static decltype(CreateDirectoryA) *CreateDirectoryA_orig = nullptr;
@@ -510,6 +511,14 @@ static BOOL WINAPI CreateDirectoryW_hook(LPCWSTR lpPathName, LPSECURITY_ATTRIBUT
     return CreateDirectoryW_orig(lpPathName, lpSecurityAttributes);
 }
 
+static BOOL WINAPI CopyFileA_hook(LPCSTR lpExistingFileName, LPCSTR lpNewFileName, BOOL bFailIfExists) {
+    // remap_settings_path_a reuses one thread_local buffer; copy the first result.
+    const char *existing = remap_settings_path_a(lpExistingFileName);
+    const std::string existing_copy = existing ? existing : std::string {};
+    const char *neu = remap_settings_path_a(lpNewFileName);
+    return CopyFileA_orig(existing_copy.c_str(), neu, bFailIfExists);
+}
+
 static BOOL WINAPI FlushFileBuffers_hook(HANDLE hFile) {
     auto *custom_handle = get_custom_handle(hFile);
     if (custom_handle && !custom_handle->com_pass) {
@@ -686,6 +695,7 @@ void devicehook_init(HMODULE module) {
     STORE(ClearCommBreak_orig, detour::iat_try("ClearCommBreak", ClearCommBreak_hook, module));
     STORE(ClearCommError_orig, detour::iat_try("ClearCommError", ClearCommError_hook, module));
     STORE(CloseHandle_orig, detour::iat_try("CloseHandle", CloseHandle_hook, module));
+    STORE(CopyFileA_orig, detour::iat_try("CopyFileA", CopyFileA_hook, module));
     STORE(CreateFileA_orig, detour::iat_try("CreateFileA", CreateFileA_hook, module));
     STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
     STORE(CreateDirectoryA_orig, detour::iat_try("CreateDirectoryA", CreateDirectoryA_hook, module));
@@ -731,6 +741,7 @@ void devicehook_init_module(HMODULE module) {
     STORE(ClearCommBreak_orig, detour::iat_try("ClearCommBreak", ClearCommBreak_hook, module));
     STORE(ClearCommError_orig, detour::iat_try("ClearCommError", ClearCommError_hook, module));
     STORE(CloseHandle_orig, detour::iat_try("CloseHandle", CloseHandle_hook, module));
+    STORE(CopyFileA_orig, detour::iat_try("CopyFileA", CopyFileA_hook, module));
     STORE(CreateFileA_orig, detour::iat_try("CreateFileA", CreateFileA_hook, module));
     STORE(CreateFileW_orig, detour::iat_try("CreateFileW", CreateFileW_hook, module));
     STORE(CreateDirectoryA_orig, detour::iat_try("CreateDirectoryA", CreateDirectoryA_hook, module));
@@ -771,6 +782,7 @@ void devicehook_init_trampoline() {
     detour::trampoline_try("kernel32.dll", "ClearCommBreak", ClearCommBreak_hook, &ClearCommBreak_orig);
     detour::trampoline_try("kernel32.dll", "ClearCommError", ClearCommError_hook, &ClearCommError_orig);
     detour::trampoline_try("kernel32.dll", "CloseHandle", CloseHandle_hook, &CloseHandle_orig);
+    detour::trampoline_try("kernel32.dll", "CopyFileA", CopyFileA_hook, &CopyFileA_orig);
     detour::trampoline_try("kernel32.dll", "CreateFileA", CreateFileA_hook, &CreateFileA_orig);
     detour::trampoline_try("kernel32.dll", "CreateDirectoryA", CreateDirectoryA_hook, &CreateDirectoryA_orig);
     detour::trampoline_try("kernel32.dll", "CreateDirectoryW", CreateDirectoryW_hook, &CreateDirectoryW_orig);
