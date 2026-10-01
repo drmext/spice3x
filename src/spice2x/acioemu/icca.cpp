@@ -28,6 +28,8 @@ ICCADevice::ICCADevice(bool flip_order, bool keypad_thread, uint8_t node_count) 
         this->accept[i] = true;
     }
     this->hold = new bool[node_count] {};
+    this->keypad_started = new bool[node_count] {};
+    this->polling_started = new bool[node_count] {};
     this->keypad = new uint16_t[node_count] {};
     this->last_keypad = new uint16_t[node_count] {};
     this->key_events = new uint8_t[node_count][2] {};
@@ -68,6 +70,8 @@ ICCADevice::~ICCADevice() {
     delete[] status;
     delete[] accept;
     delete[] hold;
+    delete[] keypad_started;
+    delete[] polling_started;
     delete[] keypad;
     delete[] last_keypad;
     delete[] key_events;
@@ -110,8 +114,8 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
             break;
         }
         case 0x0130: { // QUEUE_LOOP_START / REINITIALIZE
-
-            // send status 0
+            // bemanitools: reset fault and mark polling started
+            this->polling_started[unit] = true;
             auto msg = this->create_msg_status(msg_in, 0x00);
             write_msg(msg, response_buffer);
             delete msg;
@@ -158,8 +162,7 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
             }
 
             // bemanitools replies with the subcmd as the 1-byte status for
-            // non-v150. Sirius (JDJ) historically expected 0; FDD–I00 need the
-            // subcmd echo or card insert in test menu faults.
+            // non-v150. Sirius (JDJ) historically expected 0.
             const uint8_t st = avs::game::is_model("JDJ") ? 0x00 : subcmd;
             auto msg = this->create_msg_status(msg_in, st);
             write_msg(msg, response_buffer);
@@ -312,20 +315,31 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
             delete msg;
             break;
         }
-        case 0x013A: { // POWER CONTROL (tentative name, used in 1.7 firmware)
-            // TODO(felix): isolate this logic to LDJ and/or firmware 1.7 emulation
-
-            if (this->counter[unit] > 0) {
-                this->counter[unit]--;
+        case 0x013A: { // DEVICE_CONTROL (bemanitools AC_IO_ICCA_CMD_DEVICE_CONTROL)
+            // LDJ / wavepass 1.7 uses a countdown; FDD–JDJ (and bemanitools)
+            // expect status 0 and keypad_started=true. Wrong reply here makes
+            // Troopers show CARD DEVICE ERROR (UNKNOW STATUS) on test menu.
+            if (avs::game::is_model({"LDJ", "TBS", "XIF"})
+                    || games::sdvx::is_valkyrie_model()) {
+                if (this->counter[unit] > 0) {
+                    this->counter[unit]--;
+                }
+                auto msg = this->create_msg_status(msg_in, this->counter[unit]);
+                write_msg(msg, response_buffer);
+                delete msg;
+            } else {
+                this->keypad_started[unit] = true;
+                auto msg = this->create_msg_status(msg_in, 0x00);
+                write_msg(msg, response_buffer);
+                delete msg;
             }
-            //log_info("icca", "counter[{}] = {}", unit, this->counter[unit]);
-
-            auto msg = this->create_msg_status(msg_in, this->counter[unit]);
-            write_msg(msg, response_buffer);
-            delete msg;
             break;
         }
         case ACIO_CMD_STARTUP:
+            this->type_new = false;
+            this->keypad_started[unit] = false;
+            this->polling_started[unit] = false;
+            // fallthrough
         case ACIO_CMD_CLEAR:
         case 0x30: // GetBoardProductNumber
         case 0x31: // GetMicomInfo
@@ -564,8 +578,17 @@ void ICCADevice::update_status(int unit) {
         buffer[10] = 0x00;
     }
 
-    // other flags
-    buffer[11] = 0x03;
+    // bemanitools: keypad_started must be 0x03 once DEVICE_CONTROL ran (or on
+    // wavepass); otherwise slotted readers throw UNKNOW STATUS.
+    if (this->keypad_started[unit] || this->type_new) {
+        buffer[11] = 0x03;
+    } else {
+        buffer[11] = 0x00;
+    }
+    // Until QUEUE_LOOP_START, report FAULT like bemanitools (SDVX / boot).
+    if (!this->polling_started[unit]) {
+        buffer[0] = 0x00;
+    }
     buffer[12] = this->key_events[unit][0];
     buffer[13] = this->key_events[unit][1];
     buffer[14] = (uint8_t) (keypad[unit] >> 8);

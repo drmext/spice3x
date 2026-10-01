@@ -24,6 +24,8 @@ namespace acioemu {
         uint8_t *status;
         bool *accept;
         bool *hold;
+        bool *keypad_started;
+        bool *polling_started;
         uint16_t *keypad;
         uint16_t *last_keypad;
         uint8_t (*key_events)[2];

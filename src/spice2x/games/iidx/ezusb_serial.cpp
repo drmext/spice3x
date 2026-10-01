@@ -1,9 +1,11 @@
 #include "ezusb_serial.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 #include "avs/game.h"
@@ -95,18 +97,20 @@ struct Slot {
     bool sensor_back = false;
     uint8_t card_id[8] {};
     std::atomic<uint8_t> keypad_code{0};
-    uint16_t last_keypad = 0;
+    std::atomic<uint16_t> last_keypad{0};
     uint8_t card_slot_state = SLOT_CLOSE;
     bool write_loopback_valid = false;
     uint8_t write_loopback[128] {};
 };
 Slot g_slot[2] {};
+std::atomic<bool> g_poll_run{false};
+std::thread g_poll_thread;
 
 uint8_t keypad_scan_code(uint8_t bit);
 
-// Sample keypad on the serial/ioctl thread only. A dedicated poll thread racing
-// GameAPI/RI_MGR made 10key extremely laggy; bemanitools polls from its emu
-// thread because eamio is designed for that — spice's RI_MGR is not.
+// High-rate edge capture off the serial path. Serial-only sampling misses short
+// taps unless the key is held across a node poll (felt like "hold for hundreds
+// of ms"). No g_mu here — that contended with ezusb ioctls and locked up.
 void poll_keypad(uint8_t node) {
     if (node < 1 || node > 2) {
         return;
@@ -114,21 +118,32 @@ void poll_keypad(uint8_t node) {
     Slot &s = g_slot[node - 1];
     const size_t unit = node - 1;
     const uint16_t kp = eamuse_get_keypad_state(unit);
-    const uint16_t rise = kp & static_cast<uint16_t>(~s.last_keypad);
-    s.last_keypad = kp;
+    const uint16_t prev = s.last_keypad.load(std::memory_order_relaxed);
+    const uint16_t rise = kp & static_cast<uint16_t>(~prev);
+    s.last_keypad.store(kp, std::memory_order_relaxed);
     if (!rise) {
         return;
     }
-    // bemanitools: InterlockedCompareExchange only if buffer empty
     for (uint8_t i = 0; i < 12; i++) {
         if (rise & (1u << i)) {
             const uint8_t code = keypad_scan_code(i);
             if (code != 0) {
                 uint8_t expected = 0;
-                s.keypad_code.compare_exchange_strong(expected, code);
+                s.keypad_code.compare_exchange_strong(
+                        expected, code, std::memory_order_relaxed);
             }
             break;
         }
+    }
+}
+
+void poll_thread_main() {
+    while (g_poll_run.load(std::memory_order_relaxed)) {
+        poll_keypad(1);
+        poll_keypad(2);
+        // ~500Hz — short keyboard taps must not require holding through a
+        // slow serial KEYBOARD_* round-trip.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 }
 
@@ -286,8 +301,8 @@ void poll_slot(uint8_t node) {
         try_read_card(s, unit);
     }
 
-    // Sample keypad on every node message (RW status / keyboard polls are frequent).
-    poll_keypad(node);
+    // Keypad edges are captured on g_poll_thread — do not edge-detect here
+    // (double sampling races last_keypad and drops taps).
 }
 
 void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
@@ -609,25 +624,36 @@ void reset_slot(Slot &s) {
     s.sensor_back = false;
     memset(s.card_id, 0, sizeof(s.card_id));
     s.keypad_code.store(0);
-    s.last_keypad = 0;
+    s.last_keypad.store(0);
     s.card_slot_state = SLOT_CLOSE;
     s.write_loopback_valid = false;
     memset(s.write_loopback, 0, sizeof(s.write_loopback));
 }
 
 void init() {
-    std::lock_guard lock(g_mu);
-    g_read_busy = false;
-    g_write_busy = false;
-    g_read_len = 0;
-    g_write_len = 0;
-    g_read_page = 0;
-    g_write_page = 0;
-    memset(g_read_buf, 0, sizeof(g_read_buf));
-    memset(g_write_buf, 0, sizeof(g_write_buf));
-    reset_slot(g_slot[0]);
-    reset_slot(g_slot[1]);
+    if (g_poll_run.exchange(false)) {
+        if (g_poll_thread.joinable()) {
+            g_poll_thread.join();
+        }
+    }
+
+    {
+        std::lock_guard lock(g_mu);
+        g_read_busy = false;
+        g_write_busy = false;
+        g_read_len = 0;
+        g_write_len = 0;
+        g_read_page = 0;
+        g_write_page = 0;
+        memset(g_read_buf, 0, sizeof(g_read_buf));
+        memset(g_write_buf, 0, sizeof(g_write_buf));
+        reset_slot(g_slot[0]);
+        reset_slot(g_slot[1]);
+    }
     log_info("iidx::serial", "magnetic reader emulation initialized");
+
+    g_poll_run = true;
+    g_poll_thread = std::thread(poll_thread_main);
 }
 
 uint8_t process_cmd(uint8_t cmd) {

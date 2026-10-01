@@ -31,6 +31,53 @@ static uint32_t legacy_eamuse_addr = 0; // network byte order
 static uint16_t legacy_eamuse_port = 80; // host byte order
 static bool legacy_eamuse_enabled = false;
 
+// C02 eam3lib xml_parser_new malloc(92) zeroes callbacks through +0x54
+// (comment) but leaves +0x58 (xmlDecl) uninitialized. xml_parse then does
+// call [parser+0x58] on <?xml ...?> and jumps into free memory (minidump:
+// EIP=EAX=garbage, stack return at eam3lib xmlDecl dispatch). ECO/D01/E11/FDD
+// zero +0x58; only C02 is missing `mov [esi+58h], edi`.
+using xml_parser_new_t = void *(__cdecl *)(int, int, int, int, int);
+static xml_parser_new_t xml_parser_new_orig = nullptr;
+
+static void *__cdecl xml_parser_new_hook(int a1, int a2, int a3, int a4, int a5) {
+    void *parser = xml_parser_new_orig(a1, a2, a3, a4, a5);
+    if (parser) {
+        *reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(parser) + 0x58) = 0;
+    }
+    return parser;
+}
+
+static bool eam3lib_xml_parser_new_leaks_xmldecl(HMODULE mod) {
+    auto *p = reinterpret_cast<uint8_t *>(GetProcAddress(mod, "xml_parser_new"));
+    if (!p) {
+        return false;
+    }
+    // Prologue scan: mov [esi+54h],edi without the following mov [esi+58h],edi.
+    for (size_t i = 0; i + 5 < 0xA0; i++) {
+        if (p[i] == 0x89 && p[i + 1] == 0x7E && p[i + 2] == 0x54) {
+            return !(p[i + 3] == 0x89 && p[i + 4] == 0x7E && p[i + 5] == 0x58);
+        }
+    }
+    return false;
+}
+
+static void patch_eam3lib_xml_parser_new_bug(HMODULE eam3) {
+    if (!eam3 || !eam3lib_xml_parser_new_leaks_xmldecl(eam3)) {
+        return;
+    }
+    if (detour::trampoline_try(
+            "eam3lib.dll", "xml_parser_new",
+            xml_parser_new_hook, &xml_parser_new_orig)) {
+        log_info("network",
+                "legacy eamuse3: patched eam3lib xml_parser_new "
+                "(zero uninitialized xmlDecl callback at +0x58)");
+    } else {
+        log_warning("network",
+                "legacy eamuse3: failed to patch eam3lib xml_parser_new; "
+                "C02 may AV in xml_parse after services");
+    }
+}
+
 // settings
 std::string NETWORK_ADDR = "10.9.0.0";
 std::string NETWORK_SUBNET = "255.255.0.0";
@@ -529,6 +576,9 @@ static void install_legacy_eamuse_hooks() {
             connect_orig = conn_o;
         }
         log_info("network", "legacy eamuse3: patched IAT on {}", mod_name);
+        if (std::strcmp(mod_name, "eam3lib.dll") == 0) {
+            patch_eam3lib_xml_parser_new_bug(mod);
+        }
     }
 
     if (!gethostbyname_orig) {
