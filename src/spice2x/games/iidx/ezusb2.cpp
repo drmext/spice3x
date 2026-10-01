@@ -371,7 +371,7 @@ uint8_t sec_id_checksum(const uint8_t *id) {
     return result;
 }
 
-bool parse_hex_security_id(const std::string &hex, SecurityId *out) {
+bool parse_hex_security_id_bytes(const std::string &hex, SecurityId *out) {
     if (hex.size() != 20) {
         return false;
     }
@@ -391,7 +391,40 @@ bool parse_hex_security_id(const std::string &hex, SecurityId *out) {
         bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
     }
     memcpy(out, bytes, sizeof(*out));
-    return out->header == 0x01 && out->checksum == sec_id_checksum(out->id);
+    return out->header == 0x01;
+}
+
+std::string security_id_to_hex(const SecurityId &id) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    const auto *raw = reinterpret_cast<const uint8_t *>(&id);
+    std::string out(20, '0');
+    for (size_t i = 0; i < 10; i++) {
+        out[i * 2] = kHex[raw[i] >> 4];
+        out[i * 2 + 1] = kHex[raw[i] & 0xF];
+    }
+    return out;
+}
+
+// Spice default PCBID (options.cpp / ea3 fallback).
+constexpr char kSpiceDefaultPcbid[] = "01201000000000010101";
+
+bool apply_pcbid_hex(const std::string &hex, SecurityId *out, const char *src_label) {
+    SecurityId parsed {};
+    if (!parse_hex_security_id_bytes(hex, &parsed)) {
+        log_warning("iidx::ezusb2",
+                "PCBID {} ({}) is not a 20-hex SecurityId with header 01",
+                hex, src_label);
+        return false;
+    }
+    const uint8_t need = sec_id_checksum(parsed.id);
+    if (parsed.checksum != need) {
+        log_warning("iidx::ezusb2",
+                "PCBID {} ({}) checksum {:02X} != {:02X}; auto-fixing for plug ROM",
+                hex, src_label, parsed.checksum, need);
+        parsed.checksum = need;
+    }
+    *out = parsed;
+    return true;
 }
 
 void ensure_security_ids() {
@@ -399,21 +432,26 @@ void ensure_security_ids() {
         return;
     }
 
-    // Default bemanitools PCBID/EAMID 0101020304050607086F
-    g_pcbid = {0x01, {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}, 0x6F};
-    if (!avs::ea3::PCBID_CUSTOM.empty()) {
-        SecurityId parsed {};
-        if (parse_hex_security_id(avs::ea3::PCBID_CUSTOM, &parsed)) {
-            g_pcbid = parsed;
-        } else {
-            log_warning("iidx::ezusb2", "PCBID {} is not a 10-byte hex id; using default",
-                    avs::ea3::PCBID_CUSTOM);
+    const std::string &custom = avs::ea3::PCBID_CUSTOM;
+    const char *label = "spice default";
+    std::string source = kSpiceDefaultPcbid;
+    if (!custom.empty()) {
+        source = custom;
+        label = "-p / settings";
+    }
+
+    if (!apply_pcbid_hex(source, &g_pcbid, label)) {
+        // Last resort: spice default
+        if (!apply_pcbid_hex(kSpiceDefaultPcbid, &g_pcbid, "spice default fallback")) {
+            log_fatal("iidx::ezusb2", "failed to apply spice default PCBID");
         }
     }
+
     g_eamid = g_pcbid;
     g_ids_ready = true;
-    log_info("iidx::ezusb2", "security ids ready (PCBID checksum {:02X}, black mcode {})",
-            g_pcbid.checksum, black_mcode());
+    log_info("iidx::ezusb2",
+            "security ids ready (PCBID {}, checksum {:02X}, black mcode {})",
+            security_id_to_hex(g_pcbid), g_pcbid.checksum, black_mcode());
 }
 
 void encode_8_to_6(const uint8_t *in, uint8_t *out) {
