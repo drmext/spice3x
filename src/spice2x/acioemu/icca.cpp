@@ -162,8 +162,11 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
             }
 
             // bemanitools replies with the subcmd as the 1-byte status for
-            // non-v150. Sirius (JDJ) historically expected 0.
-            const uint8_t st = avs::game::is_model("JDJ") ? 0x00 : subcmd;
+            // non-v150. FDD–JDJ (slotted COM ICCA / shared libacio era) expect 0;
+            // returning subcmd makes Sirius (and likely Troopers) throw
+            // CARD DEVICE ERROR (UNKNOW STATUS).
+            const uint8_t st = avs::game::is_model({"FDD", "GLD", "HDD", "I00", "JDJ"})
+                    ? 0x00 : subcmd;
             auto msg = this->create_msg_status(msg_in, st);
             write_msg(msg, response_buffer);
             delete msg;
@@ -336,9 +339,11 @@ bool ICCADevice::parse_msg(MessageData *msg_in,
             break;
         }
         case ACIO_CMD_STARTUP:
+            // bemanitools START_UP only clears wavepass detection
+            // (detected_new_reader). Keep polling_started / keypad_started so
+            // test-menu re-init does not force FAULT (buffer[0]=0) or
+            // buffer[11]=0 → CARD DEVICE ERROR (UNKNOW STATUS) on FDD–JDJ.
             this->type_new = false;
-            this->keypad_started[unit] = false;
-            this->polling_started[unit] = false;
             // fallthrough
         case ACIO_CMD_CLEAR:
         case 0x30: // GetBoardProductNumber
