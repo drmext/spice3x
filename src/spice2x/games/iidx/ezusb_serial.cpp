@@ -1,7 +1,6 @@
 #include "ezusb_serial.h"
 
 #include <atomic>
-#include <chrono>
 #include <cstring>
 #include <iterator>
 #include <mutex>
@@ -11,6 +10,7 @@
 #include "avs/game.h"
 #include "misc/eamuse.h"
 #include "util/logging.h"
+#include "util/precise_timer.h"
 
 namespace games::iidx::ezusb_serial {
 namespace {
@@ -91,13 +91,63 @@ uint16_t g_write_len = 0;
 uint8_t g_read_page = 0;
 uint8_t g_write_page = 0;
 
+// Scan-code queue so fast PIN entry is not dropped while the game is slow to
+// KEYBOARD_READ. Drop oldest when full so newest digits still land.
+constexpr size_t kKeyQ = 16;
+constexpr uint8_t kKeyDebounceSamples = 2;
+
+struct KeyQueue {
+    uint8_t buf[kKeyQ] {};
+    size_t head = 0;
+    size_t tail = 0;
+    size_t count = 0;
+    std::mutex mu;
+
+    void clear() {
+        std::lock_guard lock(mu);
+        head = tail = count = 0;
+    }
+
+    void push(uint8_t code) {
+        if (code == 0) {
+            return;
+        }
+        std::lock_guard lock(mu);
+        if (count == kKeyQ) {
+            head = (head + 1) % kKeyQ;
+            count--;
+        }
+        buf[tail] = code;
+        tail = (tail + 1) % kKeyQ;
+        count++;
+    }
+
+    uint8_t pop() {
+        std::lock_guard lock(mu);
+        if (count == 0) {
+            return 0;
+        }
+        const uint8_t code = buf[head];
+        head = (head + 1) % kKeyQ;
+        count--;
+        return code;
+    }
+
+    bool empty() {
+        std::lock_guard lock(mu);
+        return count == 0;
+    }
+};
+
 struct Slot {
     EmuState emu = EmuState::Uninit;
     bool sensor_front = false;
     bool sensor_back = false;
     uint8_t card_id[8] {};
-    std::atomic<uint8_t> keypad_code{0};
-    std::atomic<uint16_t> last_keypad{0};
+    KeyQueue key_q;
+    uint16_t keypad_stable = 0;
+    uint16_t keypad_candidate = 0;
+    uint8_t keypad_stable_count = 0;
     uint8_t card_slot_state = SLOT_CLOSE;
     bool write_loopback_valid = false;
     uint8_t write_loopback[128] {};
@@ -108,42 +158,45 @@ std::thread g_poll_thread;
 
 uint8_t keypad_scan_code(uint8_t bit);
 
-// High-rate edge capture off the serial path. Serial-only sampling misses short
-// taps unless the key is held across a node poll (felt like "hold for hundreds
-// of ms"). No g_mu here — that contended with ezusb ioctls and locked up.
+// Dedicated edge sampler (no g_mu — that contended with ezusb ioctls). Debounced
+// rises feed a queue; KEYBOARD_READ pops. Precise ~5ms like bemanitools.
 void poll_keypad(uint8_t node) {
     if (node < 1 || node > 2) {
         return;
     }
     Slot &s = g_slot[node - 1];
-    const size_t unit = node - 1;
-    const uint16_t kp = eamuse_get_keypad_state(unit);
-    const uint16_t prev = s.last_keypad.load(std::memory_order_relaxed);
-    const uint16_t rise = kp & static_cast<uint16_t>(~prev);
-    s.last_keypad.store(kp, std::memory_order_relaxed);
+    const uint16_t kp = eamuse_get_keypad_state(node - 1);
+
+    if (kp == s.keypad_candidate) {
+        if (s.keypad_stable_count < kKeyDebounceSamples) {
+            s.keypad_stable_count++;
+        }
+    } else {
+        s.keypad_candidate = kp;
+        s.keypad_stable_count = 1;
+    }
+    if (s.keypad_stable_count < kKeyDebounceSamples) {
+        return;
+    }
+
+    const uint16_t rise = kp & static_cast<uint16_t>(s.keypad_stable ^ kp);
+    s.keypad_stable = kp;
     if (!rise) {
         return;
     }
     for (uint8_t i = 0; i < 12; i++) {
         if (rise & (1u << i)) {
-            const uint8_t code = keypad_scan_code(i);
-            if (code != 0) {
-                uint8_t expected = 0;
-                s.keypad_code.compare_exchange_strong(
-                        expected, code, std::memory_order_relaxed);
-            }
-            break;
+            s.key_q.push(keypad_scan_code(i));
         }
     }
 }
 
 void poll_thread_main() {
+    timeutils::PreciseSleepTimer timer;
     while (g_poll_run.load(std::memory_order_relaxed)) {
         poll_keypad(1);
         poll_keypad(2);
-        // ~500Hz — short keyboard taps must not require holding through a
-        // slow serial KEYBOARD_* round-trip.
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        timer.sleep(5);
     }
 }
 
@@ -301,8 +354,8 @@ void poll_slot(uint8_t node) {
         try_read_card(s, unit);
     }
 
-    // Keypad edges are captured on g_poll_thread — do not edge-detect here
-    // (double sampling races last_keypad and drops taps).
+    // Keypad edges are captured on g_poll_thread into key_q — do not
+    // edge-detect here (would race debounce state and drop/dupe taps).
 }
 
 void build_inner(std::vector<uint8_t> &out, uint8_t msg_cmd, uint8_t node_id,
@@ -386,6 +439,12 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
             return true;
         case NODE_KEYBOARD_INIT:
             log_misc("iidx::serial", "KEYBOARD_INIT node {}", node);
+            if (slot) {
+                slot->key_q.clear();
+                slot->keypad_stable = 0;
+                slot->keypad_candidate = 0;
+                slot->keypad_stable_count = 0;
+            }
             build_status(out, CMD_NODE_RESP, node, in->node_cmd);
             return true;
         case NODE_CARD_GET_STATUS:
@@ -494,7 +553,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
         }
         case NODE_KEYBOARD_BUF_SIZE: {
             uint8_t payload[2] = {0, 0};
-            if (slot && slot->keypad_code.load(std::memory_order_relaxed) != 0) {
+            if (slot && !slot->key_q.empty()) {
                 payload[0] = 1; // little-endian uint16 size type
             }
             build_inner(out, CMD_NODE_RESP, node, in->node_cmd, 2, payload, 2);
@@ -504,8 +563,7 @@ bool handle_msg(const SerialMsg *in, uint16_t in_len, std::vector<uint8_t> &out)
             uint8_t size_type = in->payload_len >= 1 ? in->payload[0] : 0;
             uint8_t payload[64] {};
             if (size_type >= 1 && slot) {
-                // bemanitools InterlockedExchange — take and clear
-                payload[0] = slot->keypad_code.exchange(0);
+                payload[0] = slot->key_q.pop();
             }
             static constexpr uint8_t sizes[] = {0, 1, 2, 4, 8, 16, 32, 64};
             const uint8_t payload_bytes =
@@ -623,8 +681,10 @@ void reset_slot(Slot &s) {
     s.sensor_front = false;
     s.sensor_back = false;
     memset(s.card_id, 0, sizeof(s.card_id));
-    s.keypad_code.store(0);
-    s.last_keypad.store(0);
+    s.key_q.clear();
+    s.keypad_stable = 0;
+    s.keypad_candidate = 0;
+    s.keypad_stable_count = 0;
     s.card_slot_state = SLOT_CLOSE;
     s.write_loopback_valid = false;
     memset(s.write_loopback, 0, sizeof(s.write_loopback));

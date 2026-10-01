@@ -32,23 +32,29 @@ ICCADevice::ICCADevice(bool flip_order, bool keypad_thread, uint8_t node_count) 
     this->polling_started = new bool[node_count] {};
     this->keypad = new uint16_t[node_count] {};
     this->last_keypad = new uint16_t[node_count] {};
+    this->keypad_candidate = new uint16_t[node_count] {};
+    this->keypad_stable_count = new uint8_t[node_count] {};
     this->key_events = new uint8_t[node_count][2] {};
+    this->key_event_q = new KeyEventQueue[node_count] {};
     this->crypt = new std::optional<Crypt>[node_count] {};
     this->counter = new uint8_t[node_count] {};
     for (int i = 0; i < node_count; i++) {
         this->counter[i] = 2;
     }
 
-    // keypad thread for faster polling
+    // Sole edge owner when enabled — status path only refreshes held mask +
+    // drains the event queue. ~5ms matches bemanitools serial keypad thread.
     this->keypad_thread = nullptr;
     if (keypad_thread) {
         this->keypad_thread = new std::thread([this]() {
             timeutils::PreciseSleepTimer timer;
             while (this->cards) {
                 for (int unit = 0; unit < this->node_count; unit++) {
-                    this->update_keypad(unit);
+                    std::lock_guard<std::mutex> lock(this->keypad_mutex);
+                    this->refresh_keypad_level(unit);
+                    this->sample_keypad_edges(unit);
                 }
-                timer.sleep(7);
+                timer.sleep(5);
             }
         });
     }
@@ -74,7 +80,10 @@ ICCADevice::~ICCADevice() {
     delete[] polling_started;
     delete[] keypad;
     delete[] last_keypad;
+    delete[] keypad_candidate;
+    delete[] keypad_stable_count;
     delete[] key_events;
+    delete[] key_event_q;
     delete[] crypt;
     delete[] counter;
 }
@@ -451,18 +460,9 @@ static int KEYPAD_KEY_CODES_ALT[]{
         0x10    // 00
 };
 
-void ICCADevice::update_keypad(int unit) {
-
-    // lock keypad so threads can't interfere
-    std::lock_guard<std::mutex> lock(this->keypad_mutex);
-
-    // reset remapped held mask
+void ICCADevice::refresh_keypad_level(int unit) {
     this->keypad[unit] = 0;
-
-    // get eamu key states
     uint16_t eamu_state = eamuse_get_keypad_state((size_t) unit);
-
-    // build remapped key_state for wire buffer[14..15]
     for (int n = 0; n < 12; n++) {
         if (eamu_state & (1 << KEYPAD_EAMUSE_MAPPING[n])) {
             if (ICCA_DEVICE_HACK) {
@@ -472,29 +472,67 @@ void ICCADevice::update_keypad(int unit) {
             }
         }
     }
+}
 
-    // rising edges on raw EAM mask (bemanitools-compatible key_events)
+void ICCADevice::sample_keypad_edges(int unit) {
+    uint16_t eamu_state = eamuse_get_keypad_state((size_t) unit);
+
+    if (eamu_state == this->keypad_candidate[unit]) {
+        if (this->keypad_stable_count[unit] < KEY_DEBOUNCE_SAMPLES) {
+            this->keypad_stable_count[unit]++;
+        }
+    } else {
+        this->keypad_candidate[unit] = eamu_state;
+        this->keypad_stable_count[unit] = 1;
+    }
+    if (this->keypad_stable_count[unit] < KEY_DEBOUNCE_SAMPLES) {
+        return;
+    }
+
     uint16_t rise = eamu_state & (this->last_keypad[unit] ^ eamu_state);
-    if (rise) {
-        uint8_t event;
-        if (this->key_events[unit][0]) {
-            event = (uint8_t) ((this->key_events[unit][0] + 0x10) & 0xF0);
-        } else {
-            event = 0x00;
-        }
+    this->last_keypad[unit] = eamu_state;
+    if (!rise) {
+        return;
+    }
 
-        unsigned long bit = 0;
-        // lowest set bit index == EAM_IO_KEYPAD_* (Sirius digit map)
-        while (bit < 16 && !(rise & (1u << bit))) {
-            bit++;
+    uint8_t prev = this->key_events[unit][0];
+    if (this->key_event_q[unit].count > 0) {
+        const size_t last_i = (this->key_event_q[unit].tail + KEY_EVENT_Q - 1)
+                % KEY_EVENT_Q;
+        prev = this->key_event_q[unit].buf[last_i];
+    }
+
+    for (unsigned long bit = 0; bit < 16; bit++) {
+        if (!(rise & (1u << bit))) {
+            continue;
         }
+        uint8_t event = prev ? (uint8_t) ((prev + 0x10) & 0xF0) : 0x00;
         event |= (uint8_t) (0x80 | bit);
+        this->key_event_q[unit].push(event);
+        prev = event;
+    }
+}
 
+void ICCADevice::drain_key_events(int unit) {
+    // At most two events per status (wire has key_events[2]).
+    for (int n = 0; n < 2; n++) {
+        uint8_t event = 0;
+        if (!this->key_event_q[unit].try_pop(&event)) {
+            break;
+        }
         this->key_events[unit][1] = this->key_events[unit][0];
         this->key_events[unit][0] = event;
     }
+}
 
-    this->last_keypad[unit] = eamu_state;
+void ICCADevice::update_keypad(int unit) {
+    std::lock_guard<std::mutex> lock(this->keypad_mutex);
+    this->refresh_keypad_level(unit);
+    // Thread owns edges when present — avoid double-sampling duplicates.
+    if (this->keypad_thread == nullptr) {
+        this->sample_keypad_edges(unit);
+    }
+    this->drain_key_events(unit);
 }
 
 void ICCADevice::update_status(int unit) {
