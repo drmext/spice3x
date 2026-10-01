@@ -54,6 +54,16 @@ static decltype(GetThreadLocale) *GetThreadLocale_orig = nullptr;
 // MinHook needs an orig slot even when the hook does not call through.
 static void *RtlMultiByteToUnicodeN_orig = nullptr;
 
+static HMODULE sjis_gdi32 = nullptr;
+static HMODULE sjis_gdi32full = nullptr;
+static HMODULE sjis_user32 = nullptr;
+
+static void cache_sjis_modules() {
+    sjis_gdi32 = GetModuleHandleW(L"gdi32.dll");
+    sjis_gdi32full = GetModuleHandleW(L"gdi32full.dll");
+    sjis_user32 = GetModuleHandleW(L"user32.dll");
+}
+
 // Force Shift-JIS only for GDI / the game image. eam3lib (and its CRT) must keep
 // the host ACP — blacklisting eam3 by return address fails because mbstowcs goes
 // RtlMultiByteToUnicodeN with a return address inside ntdll/ucrt, not eam3lib
@@ -62,28 +72,14 @@ static bool module_needs_sjis(const void *ret_addr) {
     if (!ret_addr) {
         return false;
     }
-    HMODULE caller = nullptr;
-    if (!GetModuleHandleExA(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
-                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCSTR>(ret_addr),
-            &caller)
-            || !caller) {
+    // Even Unicode loader lookups can invoke ANSI conversion internally.
+    // Query the image mapping instead; resolve known modules outside the hook.
+    MEMORY_BASIC_INFORMATION memory {};
+    if (!VirtualQuery(ret_addr, &memory, sizeof(memory)) || memory.Type != MEM_IMAGE) {
         return false;
     }
-    static HMODULE gdi32 = nullptr;
-    static HMODULE gdi32full = nullptr;
-    static HMODULE user32 = nullptr;
-    if (!gdi32) {
-        gdi32 = GetModuleHandleA("gdi32.dll");
-    }
-    if (!gdi32full) {
-        gdi32full = GetModuleHandleA("gdi32full.dll");
-    }
-    if (!user32) {
-        user32 = GetModuleHandleA("user32.dll");
-    }
-    if (caller == gdi32 || caller == gdi32full || caller == user32) {
+    const auto caller = static_cast<HMODULE>(memory.AllocationBase);
+    if (caller == sjis_gdi32 || caller == sjis_gdi32full || caller == sjis_user32) {
         return true;
     }
     if (avs::game::DLL_INSTANCE && caller == avs::game::DLL_INSTANCE) {
@@ -522,6 +518,7 @@ void hooks::lang::early_init() {
         // IIDX — eam3lib XML parsing (xrpc_data_get) AVs on C02 when CP_ACP is
         // forced to 932 for every caller. Game EXE IAT is still hooked in init().
         if (avs::game::is_model({ "C02", "D01", "E11", "ECO", "FDD" })) {
+            cache_sjis_modules();
             // bemanitools ACP hook: gdi32full imports RtlMultiByteToUnicodeN from
             // ntdll for ANSI text. IAT walk can miss late loads; trampoline catches all.
             if (detour::trampoline_try(
@@ -590,6 +587,7 @@ void hooks::lang::early_init() {
 void hooks::lang::init() {
     log_info("hooks::lang", "initializing");
 
+    cache_sjis_modules();
     // Keep IAT coverage for modules that imported before the ntdll trampoline.
     detour::iat_try("RtlMultiByteToUnicodeN", RtlMultiByteToUnicodeN_hook, nullptr, "ntdll.dll");
     if (!RtlMultiByteToUnicodeN_orig) {
